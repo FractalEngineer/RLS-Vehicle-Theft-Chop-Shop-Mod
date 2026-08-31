@@ -1,6 +1,6 @@
 -- RLS Career Carjacking
 -- BeamNG.drive + RLS Career Overhaul carjacking extension.
--- Version 0.2.4.
+-- Version 0.2.14.
 
 local M = {}
 
@@ -67,7 +67,8 @@ local cfg = {
   -- A police-car theft needs at least one real responder. RLS normally keeps
   -- its own police pool; we wake that first and spawn at most one marked
   -- fallback unit if no police responder remains after the theft.
-  desiredPoliceResponders = 1
+  desiredPoliceResponders = 1,
+
 }
 
 -- The only core function this mod replaces at runtime. It is required so the
@@ -86,12 +87,14 @@ local speedTrapInstallRetry = 0
 -- My Vehicles context-menu injection is performed only while the menu is
 -- opening. We never leave guihooks.trigger replaced after that call returns.
 
--- Tracks stolen vehicles that are removed/spawned by RLS storage/retrieval.
--- A newly spawned stolen car is put into a safe parked state so a remembered
--- throttle/gear state cannot make it drive away from the garage.
+-- Retrieval safety follows the final v0.1 behavior that proved reliable in
+-- game: notice a newly spawned stolen inventory object immediately, then enforce
+-- a clean controller state for a short settling window.  Unlike v0.1, we keep a
+-- small set of stolen inventory IDs instead of traversing the whole inventory
+-- every rendered frame.
+local trackedStolenInventoryIds = {}
 local observedSpawnedVehicles = {}
 local pendingSafePark = {}
-local pendingSpawnSafePark = {}
 local spawnedPoliceResponderIds = {}
 
 -- Sale-vehicle hotwire / radial-menu state.
@@ -109,13 +112,13 @@ local insuranceCleanupTimer = 0
 local maximumHeatTimer = 0
 local identityChangeProcessTimer = 0
 
--- Each live AI traffic car that becomes an inventory vehicle permanently leaves
--- BeamNG's AI traffic list. Replenish those slots asynchronously, one at a time,
--- using BeamNG's normal random traffic generator so repeated carjackings do not
--- slowly empty the map or reduce traffic variety.
-local pendingTrafficReplacementCount = 0
+-- Removing a live AI car from gameplay_traffic also removes it from BeamNG's
+-- native pool.  Keep one tiny replacement record for that exact civilian car.
+-- When the stolen object finally leaves the world (stored/sold/stripped), spawn
+-- one vehicle with the same model/config and hand it straight back to the normal
+-- traffic system.  No random replacement groups, reserve pools or variety logic.
+local trafficReplacementDebts = {}
 local trafficReplacementRetryTimer = 0
-local retrievalMonitorTimer = 0
 
 -- RLS reserves -1 for ordinary uninsured vehicles and exposes those directly
 -- through its Add Coverage UI. Keep identity-locked stolen cars on a separate
@@ -226,82 +229,151 @@ local function requestCareerSave(delay)
   end
 end
 
-local function queueTrafficReplacement()
-  pendingTrafficReplacementCount = pendingTrafficReplacementCount + 1
-  if trafficReplacementRetryTimer <= 0 then
-    -- Do not spawn a replacement during the ownership/control handoff. Vehicle
-    -- creation is one of the heavier BeamNG operations, especially the first
-    -- time a model/material is loaded in a session.
-    trafficReplacementRetryTimer = 1.50
+local function getNativeTrafficPool()
+  local pooling = rawget(_G, "core_vehicleActivePooling")
+  if type(pooling) ~= "table" and type(extensions) == "table" then
+    pooling = rawget(extensions, "core_vehicleActivePooling")
+  end
+  if type(pooling) ~= "table" or type(pooling.getPool) ~= "function" then return nil end
+  local ok, pool = pcall(function() return pooling.getPool("traffic") end)
+  return ok and pool or nil
+end
+
+local function trafficReplacementSpec(vehId, snapshot, obj)
+  local configPath = snapshot and snapshot.config and snapshot.config.partConfigFilename or nil
+  local configKey
+  if type(configPath) == "string" then
+    local normalized = configPath:gsub("\\", "/")
+    configKey = normalized:match("/([^/]+)%.pc$") or normalized:match("^([^/]+)%.pc$")
+  end
+
+  local model = snapshot and snapshot.config and snapshot.config.model or nil
+  obj = obj or (vehId and getObjectByID(vehId)) or nil
+  if not model and obj and obj.getJBeamFilename then
+    local ok, value = pcall(function() return obj:getJBeamFilename() end)
+    if ok and value and value ~= "" then model = value end
+  end
+  if not model and type(configPath) == "string" then
+    local normalized = configPath:gsub("\\", "/")
+    model = normalized:match("/vehicles/([^/]+)/") or normalized:match("^vehicles/([^/]+)/")
+  end
+
+  if not model or not configKey then return nil end
+  return {model = model, config = configKey, ready = false, attempts = 0}
+end
+
+local function markTrafficReplacementDebt(vehId, snapshot, obj)
+  vehId = tonumber(vehId) or vehId
+  if not vehId then return end
+  local spec = trafficReplacementSpec(vehId, snapshot, obj)
+  if spec then
+    trafficReplacementDebts[vehId] = spec
+  else
+    -- A missing spec should not affect the theft itself.  BeamNG still receives
+    -- its native pool-update flag below and may recover from existing inactive
+    -- traffic on its own.
+    trafficReplacementDebts[vehId] = nil
   end
 end
 
-local function processTrafficReplacements(dtReal)
-  if pendingTrafficReplacementCount <= 0 then return end
+local function flagNativeTrafficPoolUpdate()
+  local pool = getNativeTrafficPool()
+  if pool then pool._updateFlag = true end
+end
 
+local function firstReadyTrafficDebt()
+  for vehId, debt in pairs(trafficReplacementDebts) do
+    if type(debt) == "table" then
+      if debt.ready then return vehId, debt end
+      local obj = getObjectByID(vehId)
+      if not obj then
+        debt.ready = true
+        return vehId, debt
+      end
+      local ok, active = pcall(function() return obj:getActive() end)
+      if not ok or active == false or active == 0 then
+        debt.ready = true
+        return vehId, debt
+      end
+    end
+  end
+end
+
+local function spawnExactTrafficReplacement(sourceVehId, debt)
+  if type(debt) ~= "table" or not debt.model or not debt.config then return false end
+  if not core_vehicles or type(core_vehicles.spawnNewVehicle) ~= "function" then return false end
+  if not gameplay_traffic or type(gameplay_traffic.insertTraffic) ~= "function" then return false end
+
+  local focusObj = getPlayerVehicle and getPlayerVehicle(0) or nil
+  local pos
+  if focusObj and focusObj.getPosition then
+    local ok, p = pcall(function() return focusObj:getPosition() end)
+    if ok and p then pos = p + vec3(0, 0, 500) end
+  end
+
+  local options = {
+    config = debt.config,
+    autoEnterVehicle = false,
+    vehicleName = "rlsCarjackTrafficReplacement"
+  }
+  if pos then options.pos = pos end
+
+  local okSpawn, obj = pcall(function()
+    return core_vehicles.spawnNewVehicle(debt.model, options)
+  end)
+  if not okSpawn or not obj then
+    debt.attempts = (debt.attempts or 0) + 1
+    return false
+  end
+
+  local replacementId = obj:getID()
+  if map and map.request then pcall(function() map.request(replacementId, -1) end) end
+
+  -- Let the normal traffic pool decide whether this replacement should be active
+  -- or inactive.  If its active limit is already satisfied, insertVeh naturally
+  -- parks the new object in the inactive side of the same pool.
+  local okInsert = pcall(function() gameplay_traffic.insertTraffic(replacementId, false) end)
+  local traffic = gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
+  if not okInsert or not traffic[replacementId] then
+    pcall(function() obj:delete() end)
+    debt.attempts = (debt.attempts or 0) + 1
+    return false
+  end
+
+  local okActive, active = pcall(function() return obj:getActive() end)
+  if okActive and active and gameplay_traffic.forceTeleport then
+    pcall(function() gameplay_traffic.forceTeleport(replacementId, nil, nil, 120, 450, 220) end)
+  end
+
+  trafficReplacementDebts[sourceVehId] = nil
+  flagNativeTrafficPoolUpdate()
+  log("I", logTag, string.format("Restored stolen traffic slot with %s/%s", tostring(debt.model), tostring(debt.config)))
+  return true
+end
+
+local function processTrafficBackfill(dtReal)
+  if not next(trafficReplacementDebts) then return end
   trafficReplacementRetryTimer = trafficReplacementRetryTimer - dtReal
   if trafficReplacementRetryTimer > 0 then return end
 
-  if not gameplay_traffic or type(gameplay_traffic.spawnTraffic) ~= "function" then
-    trafficReplacementRetryTimer = 1.5
+  local sourceVehId, debt = firstReadyTrafficDebt()
+  if not sourceVehId then
+    trafficReplacementRetryTimer = 0.25
     return
   end
 
-  -- Do not start another asynchronous traffic spawn while BeamNG is already
-  -- building a traffic group. This also serializes several rapid carjackings.
-  if gameplay_traffic.getState then
-    local okState, state = pcall(function() return gameplay_traffic.getState() end)
-    if okState and state and state ~= "on" then
-      trafficReplacementRetryTimer = 1.0
+  if gameplay_traffic and type(gameplay_traffic.getState) == "function" then
+    local ok, state = pcall(function() return gameplay_traffic.getState() end)
+    if ok and state and state ~= "on" then
+      trafficReplacementRetryTimer = 0.5
       return
     end
   end
 
-  -- Most importantly, only create another physical vehicle when BeamNG itself
-  -- reports that the current world is below the configured traffic population.
-  -- The stolen car remains an active world vehicle while the player is driving
-  -- it, so blindly spawning one replacement per theft can push the simulation
-  -- above its intended vehicle count and cause CPU/GPU spikes. Once the stolen
-  -- car is stored, sold, stripped or otherwise leaves the active world, the
-  -- ideal spawn amount becomes positive and the queued slot is replenished.
-  if gameplay_traffic.getIdealSpawnAmount then
-    local okIdeal, ideal = pcall(function() return gameplay_traffic.getIdealSpawnAmount(-1, false) end)
-    if okIdeal and tonumber(ideal) and tonumber(ideal) <= 0 then
-      trafficReplacementRetryTimer = 1.50
-      return
-    end
-  end
-
-  local ok, err = pcall(function()
-    -- Build the same civilian traffic group BeamNG normally uses instead of a
-    -- raw random multiSpawn group. This respects level traffic selections and
-    -- avoids accidentally replenishing a civilian slot with a police config.
-    local trafficUtils = rawget(_G, "gameplay_traffic_trafficUtils")
-    local group
-    if trafficUtils then
-      local simpleVehs = settings and settings.getValue and settings.getValue("trafficSimpleVehicles") or false
-      local smartSelections = settings and settings.getValue and settings.getValue("trafficSmartSelections") or false
-      if smartSelections and not simpleVehs and trafficUtils.getTrafficGroupFromFile then
-        local fileData = trafficUtils.getTrafficGroupFromFile({name = "traffic"})
-        if fileData and core_multiSpawn and core_multiSpawn.fitGroup then
-          group = core_multiSpawn.fitGroup(fileData, 1)
-        end
-      end
-      if not group and trafficUtils.createTrafficGroup then
-        group = trafficUtils.createTrafficGroup(1, false, false, simpleVehs)
-      end
-    end
-    gameplay_traffic.spawnTraffic(1, group)
-  end)
-  if ok then
-    pendingTrafficReplacementCount = math.max(0, pendingTrafficReplacementCount - 1)
-    -- Space out additional queued replacements. Apart from reducing spikes,
-    -- this gives BeamNG's traffic pool time to register the newly spawned car
-    -- before we ask whether another slot is still missing.
-    trafficReplacementRetryTimer = pendingTrafficReplacementCount > 0 and 2.0 or 0
+  if spawnExactTrafficReplacement(sourceVehId, debt) then
+    trafficReplacementRetryTimer = 0.10
   else
-    log("W", logTag, "Unable to replenish stolen traffic slot: " .. tostring(err))
-    trafficReplacementRetryTimer = 1.5
+    trafficReplacementRetryTimer = math.min(2.0, 0.25 + 0.25 * math.min(debt.attempts or 0, 7))
   end
 end
 
@@ -316,41 +388,29 @@ local function walkerDistanceToVehicle(vehId)
   return (ok and distance) or math.huge
 end
 
-local function getCabModule()
-  local cab = rawget(_G, "gameplay_cab")
-  if type(cab) == "table" then return cab end
-
-  if type(extensions) == "table" then
-    local extCab = rawget(extensions, "gameplay_cab")
-    if type(extCab) == "table" then return extCab end
-  end
-end
-
--- RLS's player-called cab is spawned from vehicles/midsize/taxi.pc. While the
--- cab service owns that taxi, Enter/Exit must remain a normal taxi interaction
--- rather than being intercepted by carjacking. This intentionally does not
--- blanket-exempt every taxi-looking traffic vehicle.
-local function isPlayerCalledTaxi(vehId)
-  local cab = getCabModule()
-  if not cab or type(cab.cabState) ~= "function" then return false end
-
-  local okState, cabState = pcall(cab.cabState)
-  if not okState or not cabState or cabState == "none" or cabState == "cleanup" then
-    return false
+-- Carjacking should only operate on vehicles BeamNG itself has designated as
+-- traffic-only. Native traffic vehicles are blacklisted from walking-mode entry
+-- when gameplay_traffic inserts them; legitimate service/interaction vehicles
+-- remain available to gameplay_walk and must never be intercepted here.
+local function isNativeTrafficOnlyVehicle(vehId, obj)
+  if gameplay_walk and type(gameplay_walk.isVehicleBlacklisted) == "function" then
+    local ok, blacklisted = pcall(function() return gameplay_walk.isVehicleBlacklisted(vehId) end)
+    if ok and blacklisted then return true end
   end
 
-  local obj = vehId and getObjectByID(vehId) or nil
-  if not obj then return false end
-
-  local model = obj.JBeam
-  if (not model or model == "") and obj.getJBeamFilename then
-    local okModel, value = pcall(function() return obj:getJBeamFilename() end)
-    if okModel then model = value end
+  -- BeamNG also tags ordinary traffic objects with the dynamic isTraffic field.
+  -- Keep this as a compatibility fallback if the blacklist API changes.
+  obj = obj or (vehId and getObjectByID(vehId)) or nil
+  if obj and type(obj.getDynDataFieldbyName) == "function" then
+    local ok, value = pcall(function() return obj:getDynDataFieldbyName("isTraffic", 0) end)
+    if ok and (value == true or tostring(value) == "true") then return true end
   end
-  if model ~= "midsize" then return false end
+  if obj and type(obj.getField) == "function" then
+    local ok, value = pcall(function() return obj:getField("isTraffic", 0) end)
+    if ok and (value == true or tostring(value) == "true") then return true end
+  end
 
-  local partConfig = tostring(obj.partConfig or ""):gsub("\\", "/")
-  return partConfig:match("vehicles/midsize/taxi%.pc$") ~= nil
+  return false
 end
 
 local function isJackableTrafficVehicle(vehId, trafficData, ignoreSpeed)
@@ -361,7 +421,7 @@ local function isJackableTrafficVehicle(vehId, trafficData, ignoreSpeed)
 
   local obj = getObjectByID(vehId)
   if not obj then return false end
-  if isPlayerCalledTaxi(vehId) then return false end
+  if not isNativeTrafficOnlyVehicle(vehId, obj) then return false end
 
   local okActive, active = pcall(function() return obj:getActive() end)
   if okActive and not active then return false end
@@ -836,8 +896,11 @@ local sanitizeStolenPoliceTraffic
 
 local function enforceStolenVehicleState()
   local vehicles = career_modules_inventory.getVehicles and career_modules_inventory.getVehicles() or {}
+  local seenStolen = {}
   for inventoryId, vehicle in pairs(vehicles or {}) do
     if vehicle and vehicle.rlsCarjack and vehicle.rlsCarjack.stolen then
+      seenStolen[inventoryId] = true
+      trackedStolenInventoryIds[inventoryId] = true
       local data = vehicle.rlsCarjack
       local migrated = false
       if data.vinChanged == true and data.identityChanged ~= true then
@@ -872,6 +935,14 @@ local function enforceStolenVehicleState()
       syncStolenVehicleDisplayName(inventoryId, vehicle, spawnedId)
       applyStolenMarketDiscount(inventoryId)
       ensureStolenInsuranceState(inventoryId)
+    end
+  end
+
+  for inventoryId, _ in pairs(trackedStolenInventoryIds) do
+    if not seenStolen[inventoryId] then
+      trackedStolenInventoryIds[inventoryId] = nil
+      observedSpawnedVehicles[inventoryId] = nil
+      pendingSafePark[inventoryId] = nil
     end
   end
 end
@@ -1190,7 +1261,10 @@ local function completeCarjack(vehId, wasPoliceVehicle)
 
   if gameplay_traffic.removeTraffic then
     pcall(function() gameplay_traffic.removeTraffic(vehId, true) end)
-    queueTrafficReplacement()
+    -- Mirror BeamNG's own onVehicleDestroyed traffic path: after removing a
+    -- traffic object, mark the native pool dirty so it can reconcile its active
+    -- and inactive members without our mod micromanaging the pool.
+    flagNativeTrafficPoolUpdate()
   end
   if gameplay_walk.removeVehicleFromBlacklist then
     pcall(function() gameplay_walk.removeVehicleFromBlacklist(vehId) end)
@@ -1206,6 +1280,10 @@ local function completeCarjack(vehId, wasPoliceVehicle)
   if not inventoryId then
     message("Carjacking failed: RLS inventory rejected the vehicle.", 4)
     return false
+  end
+
+  if not wasPoliceVehicle then
+    markTrafficReplacementDebt(vehId, snapshot, obj)
   end
 
   local vehicle = getInventoryVehicle(inventoryId)
@@ -1242,9 +1320,7 @@ local function completeCarjack(vehId, wasPoliceVehicle)
   if nativeDisplayName then
     vehicle.niceName = nativeDisplayName
   end
-
-  -- Mark this live object as already observed so the retrieval safety logic
-  -- does not park the car during the initial theft.
+  trackedStolenInventoryIds[inventoryId] = true
   observedSpawnedVehicles[inventoryId] = vehId
 
   -- A police configuration naturally resolves to the police traffic role. RLS
@@ -1538,8 +1614,9 @@ local function completeSaleVehicleHotwire(candidate)
   if nativeDisplayName then
     vehicle.niceName = nativeDisplayName
   end
-
+  trackedStolenInventoryIds[inventoryId] = true
   observedSpawnedVehicles[inventoryId] = vehId
+
 
   -- The player was already sitting in the inspection vehicle before it became
   -- an inventory car, so no vehicle-switch event will update RLS's
@@ -1669,22 +1746,18 @@ local function installWalkingModeWrapper()
       return originalToggleWalkingMode(...)
     end
 
-    local traffic = gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
-
-    -- If BeamNG itself selected a vehicle, preserve vanilla behavior unless it
-    -- is specifically an unowned AI traffic vehicle.
+    -- BeamNG's own walking system has already resolved legitimate enterable
+    -- vehicles into vehicleInFront. Never override that decision. This is the
+    -- important compatibility boundary for RLS taxis and any other service or
+    -- scripted vehicle intended to be entered normally.
     local normalTarget = gameplay_walk.getVehicleInFront and gameplay_walk.getVehicleInFront() or nil
     if normalTarget then
-      local normalId = normalTarget:getID()
-      local trafficData = traffic[normalId]
-      if trafficData and isJackableTrafficVehicle(normalId, trafficData, true) then
-        return completeCarjack(normalId, isPoliceTrafficVehicle(trafficData))
-      end
       return originalToggleWalkingMode(...)
     end
 
-    -- AI traffic is often blacklisted by gameplay_walk, so use a simple nearby
-    -- center-distance fallback rather than modifying BeamNG's blacklist rules.
+    -- Only when vanilla has no enterable target do we look for native AI traffic.
+    -- Those vehicles are normally blacklisted from gameplay_walk, which is why a
+    -- separate nearby fallback is needed for carjacking at all.
     local targetId, _, isPolice = findJackTarget(false)
     if targetId then
       return completeCarjack(targetId, isPolice)
@@ -2164,8 +2237,6 @@ local function stripVehicleForParts(inventoryId)
       return false
     end
 
-    observedSpawnedVehicles[inventoryId] = nil
-    pendingSafePark[inventoryId] = nil
     carjackArrestGrace[inventoryId] = nil
     message(string.format("Stolen vehicle stripped for parts: $%d", payout), 4)
     if career_career and career_career.closeAllMenus then
@@ -2308,128 +2379,101 @@ local function restoreSpeedTrapExemption()
   wrappedRedLightHandler = nil
 end
 
+local retrievedStolenVehicleResetLua = [[
+  -- Do not touch beamstate/powertrain damage here.  Reset only the controller
+  -- lifecycle and driver inputs that RLS's persistent-state restore can bring
+  -- back from the last driving session.
+  if ai and ai.setMode then pcall(function() ai.setMode("disabled") end) end
+
+  if controller then
+    if controller.reset then pcall(controller.reset) end
+    if controller.resetSecondStage then pcall(controller.resetSecondStage) end
+    if controller.resetLastStage then pcall(controller.resetLastStage) end
+  end
+
+  if input and input.event then
+    input.event("throttle", 0, FILTER_DIRECT)
+    input.event("brake", 0, FILTER_DIRECT)
+    input.event("clutch", 0, FILTER_DIRECT)
+  end
+
+  local main = controller and controller.mainController or nil
+  if main then
+    if main.shiftToGearIndex then pcall(function() main.shiftToGearIndex(0) end) end
+    if main.setStarter then pcall(function() main.setStarter(false) end) end
+    if main.setEngineIgnition then pcall(function() main.setEngineIgnition(false) end) end
+  end
+
+  -- Controller-neutral is the universal request.  This direct device fallback
+  -- catches unusual controllers that do not implement shiftToGearIndex.
+  if powertrain and powertrain.getDevice then
+    local gearbox = powertrain.getDevice("gearbox")
+    if gearbox then
+      if gearbox.setGearIndex then pcall(function() gearbox:setGearIndex(0) end) end
+      if gearbox.setMode then pcall(function() gearbox:setMode("neutral") end) end
+    end
+  end
+
+  if input and input.event then
+    input.event("parkingbrake", 1, FILTER_DIRECT)
+  elseif main and main.smartParkingBrake then
+    pcall(function() main.smartParkingBrake(1, FILTER_DIRECT, true) end)
+  end
+
+  if electrics and electrics.setIgnitionLevel then
+    electrics.setIgnitionLevel(0)
+  end
+]]
+
 local function applySafeParkState(vehId)
   local obj = vehId and getObjectByID(vehId) or nil
   if not obj then return false end
 
-  -- GE-side ignition action is the same API RLS itself uses when parking or
-  -- teleporting inventory vehicles.
+  -- RLS itself uses this bridge action for ignition state.  Send it in addition
+  -- to the vehicle-side reset so the GE/VLua sides agree immediately.
   if core_vehicleBridge and core_vehicleBridge.executeAction then
     pcall(function() core_vehicleBridge.executeAction(obj, "setIgnitionLevel", 0) end)
   end
-
-  -- Vehicle-side controller APIs are generic across the stock powertrain
-  -- controllers. Neutral + smart parking brake is safer than guessing an
-  -- automatic transmission's Park index, and works for manuals as well.
-  pcall(function()
-    obj:queueLuaCommand([[
-      if input and input.event then
-        input.event("throttle", 0, FILTER_DIRECT)
-        input.event("brake", 0, FILTER_DIRECT)
-        input.event("clutch", 0, FILTER_DIRECT)
-      end
-      if controller and controller.mainController then
-        if controller.mainController.shiftToGearIndex then
-          controller.mainController.shiftToGearIndex(0)
-        end
-        if controller.mainController.smartParkingBrake then
-          controller.mainController.smartParkingBrake(1, FILTER_DIRECT, true)
-        elseif input and input.event then
-          input.event("parkingbrake", 1, FILTER_DIRECT)
-        end
-        if controller.mainController.setEngineIgnition then
-          controller.mainController.setEngineIgnition(false)
-        elseif electrics and electrics.setIgnitionLevel then
-          electrics.setIgnitionLevel(0)
-        end
-      elseif electrics and electrics.setIgnitionLevel then
-        electrics.setIgnitionLevel(0)
-      end
-    ]])
-  end)
+  pcall(function() obj:queueLuaCommand(retrievedStolenVehicleResetLua) end)
   return true
 end
 
 local function scheduleSafePark(inventoryId, vehId)
   if not inventoryId or not vehId then return end
+
+  -- First pass immediately, matching the responsiveness of the final v0.1
+  -- retrieval monitor.  Further passes cover late RLS persistent-state loads.
+  applySafeParkState(vehId)
   pendingSafePark[inventoryId] = {
     vehId = vehId,
-    timer = 0.05,
-    attempts = 8
+    timer = 0.08,
+    attempts = 10
   }
 end
 
-local function processSpawnSafeParkChecks(dtReal)
-  for vehId, pending in pairs(pendingSpawnSafePark) do
-    pending.timer = pending.timer - dtReal
-    if pending.timer <= 0 then
-      local inventoryId = career_modules_inventory.getInventoryIdFromVehicleId
-        and career_modules_inventory.getInventoryIdFromVehicleId(vehId) or nil
+local function monitorRetrievedStolenVehicles(dtReal)
+  -- This is the final-v0.1 detection behavior without the old full-inventory
+  -- per-frame traversal: only IDs already known to be stolen are checked.
+  for inventoryId, _ in pairs(trackedStolenInventoryIds) do
+    local vehId = career_modules_inventory.getVehicleIdFromInventoryId
+      and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
 
-      if inventoryId and isStolenInventoryVehicle(inventoryId) then
-        -- The initial theft is already marked as observed before the player
-        -- takes control. Only retrieval/re-spawn events should be parked.
-        if observedSpawnedVehicles[inventoryId] ~= vehId and be:getPlayerVehicleID(0) ~= vehId then
-          observedSpawnedVehicles[inventoryId] = vehId
+    if vehId then
+      if observedSpawnedVehicles[inventoryId] ~= vehId then
+        observedSpawnedVehicles[inventoryId] = vehId
+        if be:getPlayerVehicleID(0) ~= vehId then
           scheduleSafePark(inventoryId, vehId)
         end
-        pendingSpawnSafePark[vehId] = nil
-      else
-        pending.attempts = pending.attempts - 1
-        if pending.attempts <= 0 or not getObjectByID(vehId) then
-          pendingSpawnSafePark[vehId] = nil
-        else
-          pending.timer = 0.12
-        end
       end
-    end
-  end
-end
-
-local function monitorRetrievedStolenVehicles(dtReal)
-  -- Vehicle spawn/destroy hooks handle the normal retrieval path. Keep this
-  -- inventory-wide scan only as a compatibility fallback, and throttle it so
-  -- large career inventories are not traversed every rendered frame.
-  retrievalMonitorTimer = retrievalMonitorTimer - dtReal
-  if retrievalMonitorTimer <= 0 then
-    retrievalMonitorTimer = 0.50
-    local vehicles = career_modules_inventory.getVehicles and career_modules_inventory.getVehicles() or {}
-
-    -- Clean observations for deleted/non-stolen inventory entries.
-    for inventoryId, _ in pairs(observedSpawnedVehicles) do
-      local vehicle = vehicles[inventoryId]
-      if not vehicle or not (vehicle.rlsCarjack and vehicle.rlsCarjack.stolen) then
-        observedSpawnedVehicles[inventoryId] = nil
-        pendingSafePark[inventoryId] = nil
-      end
-    end
-
-    for inventoryId, vehicle in pairs(vehicles or {}) do
-      if vehicle and vehicle.rlsCarjack and vehicle.rlsCarjack.stolen then
-        local vehId = career_modules_inventory.getVehicleIdFromInventoryId and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
-        if vehId then
-          if observedSpawnedVehicles[inventoryId] ~= vehId then
-            observedSpawnedVehicles[inventoryId] = vehId
-            -- Never interrupt the actively driven car. The initial carjacking
-            -- path seeds observedSpawnedVehicles before the player enters it.
-            if be:getPlayerVehicleID(0) ~= vehId then
-              scheduleSafePark(inventoryId, vehId)
-            end
-          end
-        else
-          observedSpawnedVehicles[inventoryId] = nil
-          pendingSafePark[inventoryId] = nil
-        end
-      end
+    else
+      observedSpawnedVehicles[inventoryId] = nil
+      pendingSafePark[inventoryId] = nil
     end
   end
 
-  -- Pending safe-park operations remain frame-timed so the short delayed reset
-  -- still happens promptly after a vehicle is retrieved.
   for inventoryId, pending in pairs(pendingSafePark) do
     pending.timer = pending.timer - dtReal
     if pending.timer <= 0 then
-      -- If the player entered the car before the delayed reset, leave it alone.
       if be:getPlayerVehicleID(0) == pending.vehId then
         pendingSafePark[inventoryId] = nil
       elseif not getObjectByID(pending.vehId) then
@@ -2440,7 +2484,7 @@ local function monitorRetrievedStolenVehicles(dtReal)
         if pending.attempts <= 0 then
           pendingSafePark[inventoryId] = nil
         else
-          pending.timer = 0.18
+          pending.timer = 0.15
         end
       end
     end
@@ -2475,7 +2519,8 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 
   processPendingHotwire()
   processHotwireRelease(dtReal)
-  processTrafficReplacements(dtReal)
+  processTrafficBackfill(dtReal)
+  monitorRetrievedStolenVehicles(dtReal)
   processPendingIdentityChanges(dtReal)
 
   -- Run the handoff guard before assigning/maintaining police pursuit.
@@ -2484,8 +2529,6 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   processMaximumHeat(dtReal)
   processIdentityScan(dtReal)
   processDeferredWork(dtReal)
-  processSpawnSafeParkChecks(dtReal)
-  monitorRetrievedStolenVehicles(dtReal)
 
   if not originalSpeedTrapHandler then
     speedTrapInstallRetry = speedTrapInstallRetry - dtReal
@@ -2502,16 +2545,14 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   end
 end
 
-local function onVehicleSpawned(vehId)
-  vehId = tonumber(vehId) or vehId
-  if not vehId then return end
-  pendingSpawnSafePark[vehId] = {timer = 0.05, attempts = 12}
-end
-
 local function onVehicleDestroyed(vehId)
   vehId = tonumber(vehId) or vehId
   if not vehId then return end
-  pendingSpawnSafePark[vehId] = nil
+  if trafficReplacementDebts[vehId] then
+    trafficReplacementDebts[vehId].ready = true
+    trafficReplacementRetryTimer = 0
+  end
+
   for inventoryId, observedVehId in pairs(observedSpawnedVehicles) do
     if observedVehId == vehId then
       observedSpawnedVehicles[inventoryId] = nil
@@ -2520,9 +2561,20 @@ local function onVehicleDestroyed(vehId)
   end
 end
 
+local function onVehicleActiveChanged(vehId, active)
+  vehId = tonumber(vehId) or vehId
+  if not vehId then return end
+  local isActive = not (active == false or active == 0)
+  if not isActive and trafficReplacementDebts[vehId] then
+    trafficReplacementDebts[vehId].ready = true
+    trafficReplacementRetryTimer = 0
+  end
+end
+
 local function onVehicleAdded(inventoryId)
   inventoryId = tonumber(inventoryId) or inventoryId
   if inventoryId and isStolenInventoryVehicle(inventoryId) then
+    trackedStolenInventoryIds[inventoryId] = true
     ensureInventoryBaseValue(inventoryId)
     applyStolenMarketDiscount(inventoryId)
     ensureStolenInsuranceState(inventoryId)
@@ -2571,6 +2623,11 @@ local function onExtensionUnloaded()
   pendingHotwire = nil
   pendingHotwireRelease = {}
   quickAccessInitialized = false
+  trafficReplacementDebts = {}
+  trafficReplacementRetryTimer = 0
+  trackedStolenInventoryIds = {}
+  observedSpawnedVehicles = {}
+  pendingSafePark = {}
   cleanupSpawnedPoliceResponders()
   restoreSpeedTrapExemption()
   restoreWalkingModeWrapper()
@@ -2583,8 +2640,8 @@ M.stripVehicleForParts = stripVehicleForParts
 M.hotwireSaleVehicle = function() return completeSaleVehicleHotwire(getHotwireCandidate()) end
 M.getConfig = function() return cfg end
 
-M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleDestroyed = onVehicleDestroyed
+M.onVehicleActiveChanged = onVehicleActiveChanged
 M.onVehicleAdded = onVehicleAdded
 M.onComputerAddFunctions = onComputerAddFunctions
 M.onBeforeRadialOpened = onBeforeRadialOpened

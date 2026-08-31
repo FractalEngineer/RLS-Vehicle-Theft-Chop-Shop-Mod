@@ -5,8 +5,8 @@ Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 ## Features
 
 - Steal live AI traffic using the normal **Enter/Exit Vehicle** control.
-- Taxis called through the RLS cab service are exempt from carjacking while the cab service is active, so **Enter/Exit Vehicle** enters the taxi normally.
-- Stolen traffic is automatically replenished with a new normal traffic vehicle so repeated carjackings do not empty the map.
+- Vehicles that BeamNG/RLS exposes as normal walking-mode entry targets are never intercepted by carjacking. This keeps called passenger taxis and other legitimate service/scripted vehicles on their native Enter/Exit interaction.
+- Carjacking leaves BeamNG/RLS traffic management in control. When a stolen civilian traffic vehicle later leaves the active world, the mod restores exactly that one removed traffic entry with the same model/configuration and hands it directly back to BeamNG's normal traffic pool. There is no separate taxi logic, random replacement pool, reserve pool or variety manager.
 - Hotwire inspected vehicles for sale from the action wheel outside an active test drive; the vehicle is released and started when the hotwire completes.
 - Police vehicles can be stolen and trigger maximum police heat.
 - Stolen vehicles keep their configuration, damage, paint and license plate when first stolen.
@@ -16,7 +16,7 @@ Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 - Stolen vehicle identity becomes known to police after a delay and can trigger a pursuit when the vehicle is recognized nearby.
 - Stolen vehicles have reduced market value.
 - Hotwiring dealership vehicles applies a configurable dealer reputation penalty.
-- Retrieved stolen vehicles spawn safely parked with the ignition off and parking brake applied.
+- Retrieved stolen vehicles are detected immediately and repeatedly reset to a safe controller state during the short RLS retrieval handoff: AI disabled, driver inputs cleared, transmission in neutral, parking brake applied, starter off and ignition off. Physical vehicle damage is left intact.
 - Retrieved stolen vehicles can be **stripped for parts** from their garage vehicle menu for a heavily reduced payout.
 
 ## Installation
