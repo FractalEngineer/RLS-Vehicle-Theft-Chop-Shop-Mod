@@ -23,6 +23,9 @@ README.md
 lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
+ui/modModules/rlsCarjacking/rlsCarjacking.js
+ui/modModules/rlsCarjacking/icons/hotwire.svg
+ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
 
 Do not add backup/research/temp files or directory entries to the release ZIP. Do not use `_archived` in release filenames.
@@ -170,7 +173,7 @@ The implementation uses a private negative insurance state distinct from RLS ord
 - changes paint to a random available native paint;
 - clears future stolen-vehicle identification;
 - restores ordinary RLS insurance eligibility;
-- keeps the stolen-value balancing penalty.
+- restores normal valuation after identity change (user-requested change in v0.2.16, superseding the v0.2.14 balancing rule).
 
 Default duration:
 ```lua
@@ -356,6 +359,9 @@ Before packaging:
    lua/ge/extensions/career/modules/carjacking.lua
    mod_info/M3Z1BLS58/icon.jpg
    mod_info/M3Z1BLS58/info.json
+   ui/modModules/rlsCarjacking/rlsCarjacking.js
+   ui/modModules/rlsCarjacking/icons/hotwire.svg
+   ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
    ```
 10. `zipfile.testzip()` must return `None`.
 11. Fully restart BeamNG after replacing a test/release ZIP.

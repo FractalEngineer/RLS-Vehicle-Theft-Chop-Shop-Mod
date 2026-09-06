@@ -2,6 +2,24 @@
 
 ## Status
 
+**Current working build: v0.2.16, targeting RLS 2.7.1. Not yet verified in BeamNG.**
+
+v0.2.16 adds native Strip for Parts confirmation after the condition refresh, with vehicle name/ID, an exact quote, Cancel as default, and one-use request tokens. Confirmation rechecks ownership, availability, vehicle identity and quote. Ordinary purchased vehicles remain excluded. Successful identity changes now remove the synthetic meet-reputation discount immediately; older identity-changed saves are migrated once by the normal stolen-state enforcement pass. Later native meet-reputation changes are left alone. This supersedes the original requirement to retain the value penalty after identity change.
+
+Additional runtime checks: cancel stripping with both Cancel and Back/Escape, confirm the correct car/payout, verify ordinary purchased cars have no Strip option; change identity and confirm normal value; reload a previously identity-changed car and confirm its penalty stays removed.
+
+The v0.2.14 baseline is already committed and tagged (`6edbfc3`). The September 2026 user report supersedes the old retrieval/stripping status below for RLS 2.7.1.
+
+v0.2.15 changes:
+- Garage retrieval restarts the existing bounded safe-state guard on native `onTeleportedToGarage`, including same-object retrieval. Retries count simulation time, so paused menus cannot exhaust them. BeamNG's velocity-only cluster operation clears motion; queued vehicle commands skip vehicles the player has entered. The redundant separate ignition bridge request is removed.
+- Stripping accepts a valid zero valuation, normalizes numeric inventory IDs, checks availability, closes the menu for the live condition request, prevents duplicate/late transactions, and reports errors/timeouts. The reported no-op has not been reproduced in BeamNG; these address confirmed failure paths and make remaining failures observable.
+- Exact civilian replacement remains necessary: 2.7.1 still removes stolen entries without automatic one-for-one replenishment. Replacement debts are discarded when their native pool changes. Insertion no longer forces the native pool-wide activation pass.
+- Imported SVGs are bundled unchanged. Hotwire uses the radial menu's native path support; an isolated UI mod decorates the Strip for Parts computer tile because RLS 2.7.1 ignores Lua icon fields. No RLS/Vue files are overridden. The decorator depends on RLS's `.computer-function-tile`, `.label`, `.icon` markup and this add-on's English strip label.
+
+Source inspected: installed `rls_career_overhaul_2.7.1.zip` and the current BeamNG Lua/UI files. Reference extraction and Lua test dependencies are under Windows TEMP, excluded from the release. `tools/validate_release.py --lua-deps <temporary-lupa-install> --package` runs loadfile/regression checks and builds the explicit seven-file manifest. `tests/test_icons.cjs` checks the scoped UI decorator.
+
+Runtime tests still required: stripping damaged/undamaged/totaled vehicles; store in D/manual gear with engine running and retrieve without entry (also retrieve an already-live car); verify neutral, engine/starter off, brake on, no movement, damage/paint/plate retained; verify both icons; repeated theft/store/sell/strip and a mission transition; normal taxi entry, police theft, pursuit completion, hotwire and identity/insurance matrix below.
+
 **Current known-good baseline: v0.2.14**
 
 This handoff supersedes older notes describing v0.2.13 retrieval and taxi-replenishment regressions.
@@ -29,6 +47,9 @@ README.md
 lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
+ui/modModules/rlsCarjacking/rlsCarjacking.js
+ui/modModules/rlsCarjacking/icons/hotwire.svg
+ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
 
 ---
@@ -386,6 +407,9 @@ README.md
 lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
+ui/modModules/rlsCarjacking/rlsCarjacking.js
+ui/modModules/rlsCarjacking/icons/hotwire.svg
+ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
 
 Do not invent numeric BeamNG `resource_id` or `resource_version_id` fields.

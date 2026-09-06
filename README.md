@@ -2,11 +2,13 @@
 
 Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 
+Version **0.2.16**, updated for **RLS Career Overhaul 2.7.1**.
+
 ## Features
 
 - Steal live AI traffic using the normal **Enter/Exit Vehicle** control.
 - Vehicles that BeamNG/RLS exposes as normal walking-mode entry targets are never intercepted by carjacking. This keeps called passenger taxis and other legitimate service/scripted vehicles on their native Enter/Exit interaction.
-- Carjacking leaves BeamNG/RLS traffic management in control. When a stolen civilian traffic vehicle later leaves the active world, the mod restores exactly that one removed traffic entry with the same model/configuration and hands it directly back to BeamNG's normal traffic pool. There is no separate taxi logic, random replacement pool, reserve pool or variety manager.
+- Carjacking leaves BeamNG/RLS traffic management in control. When a stolen civilian traffic vehicle later leaves the active world, the mod restores exactly that one removed traffic entry with the same model/configuration. If RLS has rebuilt the traffic pool in the meantime, that new population takes precedence.
 - Hotwire inspected vehicles for sale from the action wheel outside an active test drive; the vehicle is released and started when the hotwire completes.
 - Police vehicles can be stolen and trigger maximum police heat.
 - Stolen vehicles keep their configuration, damage, paint and license plate when first stolen.
@@ -14,10 +16,10 @@ Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 - Eligible stolen vehicles can use **Change Vehicle Identity** from their garage vehicle menu. The service randomizes the paint and license plate, clears future stolen-vehicle identification and makes the vehicle eligible for normal RLS insurance again.
 - Stolen police vehicles cannot have their identity changed.
 - Stolen vehicle identity becomes known to police after a delay and can trigger a pursuit when the vehicle is recognized nearby.
-- Stolen vehicles have reduced market value.
+- Stolen vehicles have reduced market value until their identity is changed.
 - Hotwiring dealership vehicles applies a configurable dealer reputation penalty.
 - Retrieved stolen vehicles are detected immediately and repeatedly reset to a safe controller state during the short RLS retrieval handoff: AI disabled, driver inputs cleared, transmission in neutral, parking brake applied, starter off and ignition off. Physical vehicle damage is left intact.
-- Retrieved stolen vehicles can be **stripped for parts** from their garage vehicle menu for a heavily reduced payout.
+- Retrieved stolen vehicles can be **stripped for parts** from their garage computer menu for a heavily reduced payout, including totaled cars. Hotwire and Strip for Parts include custom icons.
 
 ## Installation
 
@@ -41,13 +43,19 @@ Open the action wheel and select **Hotwire**. The vehicle is removed from the sa
 
 Dealership vehicles can reduce reputation with that dealer's associated organization. RLS private marketplace sellers do not currently share a dealership organization reputation, so private-sale hotwires do not apply that reputation penalty.
 
+## Stripping for Parts
+
+Retrieve a stolen vehicle to a garage, open the garage computer, select the vehicle and choose **Strip for Parts**. The menu closes while its current condition is checked, then a confirmation popup shows the vehicle name, inventory number and payout. **Cancel** is selected by default. Confirming permanently removes the entire vehicle and pays 5% of its current value by default, with a minimum payout of $1. Normally purchased vehicles cannot be stripped through this add-on.
+
+Cancel an auction listing or wait for a rented/delayed vehicle to become accessible before stripping it. If the condition check fails or times out, stripping is cancelled and a message explains what happened.
+
 ## Changing a Stolen Vehicle Identity
 
 Retrieve an eligible stolen vehicle to a garage and open its vehicle menu. Select **Change Vehicle Identity**.
 
 BeamNG/RLS does not currently expose a native VIN for career inventory vehicles, so this represents changing the vehicle's identifying markings and registration identity as a gameplay mechanic. On completion, the vehicle receives a random paint color from its model's available paints and a newly generated license plate.
 
-Before the service is completed, the vehicle remains blocked from RLS insurance and can still be identified as stolen. After completion, it becomes a normal uninsured vehicle that can receive coverage through RLS's Insurance menu. The stolen-value reduction remains in place for economy balance.
+Before the service is completed, the vehicle remains blocked from RLS insurance and can still be identified as stolen. After completion, it becomes a normal uninsured vehicle that can receive coverage through RLS's Insurance menu, and the stolen-value penalty is removed. Normal condition, damage and market factors still affect its value. Vehicles whose identity was changed in an older version also regain normal valuation when loaded.
 
 Stolen police vehicles cannot use this service.
 

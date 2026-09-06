@@ -1,6 +1,6 @@
 -- RLS Career Carjacking
 -- BeamNG.drive + RLS Career Overhaul carjacking extension.
--- Version 0.2.14.
+-- Version 0.2.16.
 
 local M = {}
 
@@ -95,6 +95,8 @@ local speedTrapInstallRetry = 0
 local trackedStolenInventoryIds = {}
 local observedSpawnedVehicles = {}
 local pendingSafePark = {}
+local pendingStrips = {}
+local stripRequestSerial = 0
 local spawnedPoliceResponderIds = {}
 
 -- Sale-vehicle hotwire / radial-menu state.
@@ -267,6 +269,7 @@ local function markTrafficReplacementDebt(vehId, snapshot, obj)
   if not vehId then return end
   local spec = trafficReplacementSpec(vehId, snapshot, obj)
   if spec then
+    spec.pool = getNativeTrafficPool()
     trafficReplacementDebts[vehId] = spec
   else
     -- A missing spec should not affect the theft itself.  BeamNG still receives
@@ -283,7 +286,11 @@ end
 
 local function firstReadyTrafficDebt()
   for vehId, debt in pairs(trafficReplacementDebts) do
-    if type(debt) == "table" then
+    if debt.pool ~= getNativeTrafficPool() then
+      -- Mission/map transitions can replace the entire native pool. RLS owns
+      -- that new population; an old theft must not add another car to it.
+      trafficReplacementDebts[vehId] = nil
+    elseif type(debt) == "table" then
       if debt.ready then return vehId, debt end
       local obj = getObjectByID(vehId)
       if not obj then
@@ -346,7 +353,8 @@ local function spawnExactTrafficReplacement(sourceVehId, debt)
   end
 
   trafficReplacementDebts[sourceVehId] = nil
-  flagNativeTrafficPoolUpdate()
+  -- insertTraffic/insertVeh already reconcile the new member and active count.
+  -- Do not force updateTrafficPool's map-wide setAllVehs(true) after insertion.
   log("I", logTag, string.format("Restored stolen traffic slot with %s/%s", tostring(debt.model), tostring(debt.config)))
   return true
 end
@@ -813,6 +821,21 @@ end
 local function applyStolenMarketDiscount(inventoryId)
   local data, vehicle = getCarjackData(inventoryId)
   if not data or not data.stolen or not vehicle then return false end
+
+  if data.identityChanged or data.vinChanged then
+    -- Undo only our synthetic reputation discount, once. This also migrates
+    -- vehicles whose identity was changed in older saves. Keep the historical
+    -- theft metadata, but leave subsequent native reputation/value changes alone.
+    if data.marketDiscountMeetReputation ~= nil or
+      (data.marketOriginalMeetReputation ~= nil and data.marketValueMultiplier ~= 1) then
+      vehicle.meetReputation = tonumber(data.marketOriginalMeetReputation) or 0
+      data.marketDiscountMeetReputation = nil
+      data.marketValueMultiplier = 1
+      markVehicleDirty(inventoryId)
+      return true
+    end
+    return false
+  end
 
   if data.marketOriginalMeetReputation == nil then
     data.marketOriginalMeetReputation = tonumber(vehicle.meetReputation) or 0
@@ -1715,7 +1738,7 @@ local function registerHotwireQuickAccessEntry()
       if not candidate then return end
       table.insert(entries, {
         title = "Hotwire",
-        icon = "lockOpened",
+        icon = "/ui/modModules/rlsCarjacking/icons/hotwire.svg",
         priority = 52,
         subtitle = "Steal this vehicle",
         onSelect = function()
@@ -2067,6 +2090,7 @@ local function finalizeVehicleIdentityChange(inventoryId, paidCost)
   data.identityChangePaidCost = nil
   data.changedIdentityPlate = newPlate
   data.changedIdentityPaint = paintName
+  applyStolenMarketDiscount(inventoryId)
 
   -- Move from the private identity-locked state into RLS's normal uninsured
   -- pool immediately. The player can then use Insurance -> Add Coverage.
@@ -2203,44 +2227,108 @@ local function calculateStripValue(inventoryId)
   local ok, currentValue = pcall(function()
     return calculator.getInventoryVehicleValue(inventoryId)
   end)
-  currentValue = ok and positiveNumber(currentValue) or nil
-  if not currentValue then return nil end
+  currentValue = ok and tonumber(currentValue) or nil
+  -- A totaled car can legitimately be worth zero. Still allow its disposal;
+  -- reject unavailable/non-finite valuations rather than guessing a price.
+  if not currentValue or currentValue ~= currentValue or currentValue < 0 or currentValue == math.huge then return nil end
 
   return math.max(1, math.floor(currentValue * cfg.stripPartsMultiplier + 0.5)), currentValue
 end
 
+local function resolveStripConfirmation(inventoryId, token, confirmed)
+  inventoryId = tonumber(inventoryId) or inventoryId
+  local request = pendingStrips[inventoryId]
+  if not request or request.token ~= token or not request.confirm then return false end
+  pendingStrips[inventoryId] = nil
+  if confirmed ~= true then return false end
+  return request.confirm()
+end
+
 local function stripVehicleForParts(inventoryId)
+  inventoryId = tonumber(inventoryId) or inventoryId
   if not inventoryId or not isStolenInventoryVehicle(inventoryId) then
     message("Only stolen vehicles can be stripped for parts.", 3)
     return false
   end
 
+  if pendingStrips[inventoryId] then return false end
+  local vehicle = getInventoryVehicle(inventoryId)
+  if vehicle.timeToAccess or vehicle.listedForAuction then
+    message("This vehicle is unavailable or listed for auction. Cancel the listing or wait until it is accessible.", 5)
+    return false
+  end
+  stripRequestSerial = stripRequestSerial + 1
+  local request = {vehicle = vehicle, timer = 10, token = stripRequestSerial}
+  pendingStrips[inventoryId] = request
+
   local function finishStrip()
-    if not isStolenInventoryVehicle(inventoryId) then return false end
+    -- Ignore a late/duplicate callback, including one for a reused inventory ID.
+    if pendingStrips[inventoryId] ~= request or request.confirm then return false end
+    if getInventoryVehicle(inventoryId) ~= request.vehicle or not isStolenInventoryVehicle(inventoryId) then
+      pendingStrips[inventoryId] = nil
+      return false
+    end
 
     local payout = calculateStripValue(inventoryId)
     if not payout then
+      pendingStrips[inventoryId] = nil
       message("Unable to determine a safe current value. Vehicle was not removed.", 4)
       return false
     end
 
-    if not career_modules_inventory.sellVehicle then
-      message("RLS vehicle removal is unavailable. Vehicle was not removed.", 4)
+    if not guihooks or not guihooks.trigger then
+      pendingStrips[inventoryId] = nil
+      message("Confirmation dialog is unavailable. Stripping cancelled.", 4)
       return false
     end
 
-    local ok, sold = pcall(function()
-      return career_modules_inventory.sellVehicle(inventoryId, payout)
+    request.confirm = function()
+      -- The dialog authorizes this exact vehicle and quote, never whichever
+      -- vehicle is subsequently selected or reuses the inventory ID.
+      if getInventoryVehicle(inventoryId) ~= request.vehicle or not isStolenInventoryVehicle(inventoryId) then return false end
+      if vehicle.timeToAccess or vehicle.listedForAuction or calculateStripValue(inventoryId) ~= payout then
+        message("Vehicle availability or value changed. Stripping cancelled; select it again for a new quote.", 5)
+        return false
+      end
+      if not career_modules_inventory.sellVehicle then
+        message("RLS vehicle removal is unavailable. Vehicle was not removed.", 4)
+        return false
+      end
+      local ok, sold = pcall(function()
+        return career_modules_inventory.sellVehicle(inventoryId, payout)
+      end)
+      if not ok or sold ~= true then
+        log("E", logTag, "Strip sale failed for " .. tostring(inventoryId) .. ": " .. tostring(sold))
+        message("RLS could not complete stripping. Check vehicle availability and the game log.", 5)
+        return false
+      end
+      carjackArrestGrace[inventoryId] = nil
+      message(string.format("Stolen vehicle stripped for parts: $%d", payout), 4)
+      if career_career and career_career.closeAllMenus then
+        pcall(function() career_career.closeAllMenus() end)
+      end
+      return true
+    end
+
+    request.timer = nil -- waiting for a person must not time out or imply consent
+    local name = plainLabel(vehicle.niceName) or plainLabel(vehicle.Name) or "Stolen vehicle"
+    -- The native dialog renders HTML; vehicle names must remain literal text.
+    name = name:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&#39;")
+    local callback = string.format("career_modules_carjacking.resolveStripConfirmation(%q, %d, ", tostring(inventoryId), request.token)
+    local ok = pcall(function()
+      guihooks.trigger("showConfirmationDialog", {
+        title = "Strip for Parts?",
+        text = string.format("Permanently strip <strong v-pre>%s</strong> (vehicle #%s) for <strong>$%d</strong>?<br>This removes the entire vehicle from your inventory and cannot be undone.", name, tostring(inventoryId), payout),
+        buttons = {
+          {label = "Cancel", luaCallback = callback .. "false)", isCancel = true, default = true},
+          {label = "Strip for Parts", luaCallback = callback .. "true)"}
+        }
+      })
     end)
-    if not ok or sold ~= true then
-      message("Unable to strip this vehicle. Vehicle was not removed.", 4)
+    if not ok then
+      pendingStrips[inventoryId] = nil
+      message("Unable to show confirmation. Stripping cancelled.", 4)
       return false
-    end
-
-    carjackArrestGrace[inventoryId] = nil
-    message(string.format("Stolen vehicle stripped for parts: $%d", payout), 4)
-    if career_career and career_career.closeAllMenus then
-      pcall(function() career_career.closeAllMenus() end)
     end
     return true
   end
@@ -2249,11 +2337,22 @@ local function stripVehicleForParts(inventoryId)
   -- condition rather than a stale pre-crash value.
   local vehId = career_modules_inventory.getVehicleIdFromInventoryId
     and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
-  if vehId and career_modules_inventory.updatePartConditions then
-    local ok = pcall(function()
+  local obj = vehId and getObjectByID(vehId) or nil
+  if obj and career_modules_inventory.updatePartConditions then
+    -- Let vehicle Lua run while the asynchronous condition request is pending.
+    -- Do not leave the player in a menu waiting with no visible feedback.
+    if career_career and career_career.closeAllMenus then
+      pcall(function() career_career.closeAllMenus() end)
+    end
+    message("Stripping vehicle: checking its current condition...", 3)
+    local ok, err = pcall(function()
       career_modules_inventory.updatePartConditions(vehId, inventoryId, finishStrip)
     end)
     if ok then return true end
+    pendingStrips[inventoryId] = nil
+    log("E", logTag, "Strip condition update failed: " .. tostring(err))
+    message("Unable to read current vehicle condition. Stripping cancelled.", 5)
+    return false
   end
 
   return finishStrip()
@@ -2380,6 +2479,8 @@ local function restoreSpeedTrapExemption()
 end
 
 local retrievedStolenVehicleResetLua = [[
+  -- The player may have entered since GE queued this command.
+  if playerInfo and playerInfo.anyPlayerSeated then return end
   -- Do not touch beamstate/powertrain damage here.  Reset only the controller
   -- lifecycle and driver inputs that RLS's persistent-state restore can bring
   -- back from the last driving session.
@@ -2429,10 +2530,10 @@ local function applySafeParkState(vehId)
   local obj = vehId and getObjectByID(vehId) or nil
   if not obj then return false end
 
-  -- RLS itself uses this bridge action for ignition state.  Send it in addition
-  -- to the vehicle-side reset so the GE/VLua sides agree immediately.
-  if core_vehicleBridge and core_vehicleBridge.executeAction then
-    pcall(function() core_vehicleBridge.executeAction(obj, "setIgnitionLevel", 0) end)
+  -- Stop inherited motion without resetting beams, parts or damage. This is
+  -- the same velocity-only operation used by BeamNG's placement code.
+  if obj.applyClusterVelocityScaleAdd and obj.getRefNodeId then
+    pcall(function() obj:applyClusterVelocityScaleAdd(obj:getRefNodeId(), 0, 0, 0, 0) end)
   end
   pcall(function() obj:queueLuaCommand(retrievedStolenVehicleResetLua) end)
   return true
@@ -2440,6 +2541,7 @@ end
 
 local function scheduleSafePark(inventoryId, vehId)
   if not inventoryId or not vehId then return end
+  if be:getPlayerVehicleID(0) == vehId then return end
 
   -- First pass immediately, matching the responsiveness of the final v0.1
   -- retrieval monitor.  Further passes cover late RLS persistent-state loads.
@@ -2451,7 +2553,20 @@ local function scheduleSafePark(inventoryId, vehId)
   }
 end
 
-local function monitorRetrievedStolenVehicles(dtReal)
+local function onTeleportedToGarage(garageId, obj)
+  if not obj then return end
+  local vehId = obj:getID()
+  local inventoryId = career_modules_inventory.getInventoryIdFromVehicleId(vehId)
+  if inventoryId and isStolenInventoryVehicle(inventoryId) then
+    trackedStolenInventoryIds[inventoryId] = true
+    observedSpawnedVehicles[inventoryId] = vehId
+    -- RLS can retrieve an already-spawned object. Restart the guard after the
+    -- native placement callback, even when its vehicle ID has not changed.
+    scheduleSafePark(inventoryId, vehId)
+  end
+end
+
+local function monitorRetrievedStolenVehicles(dtSim)
   -- This is the final-v0.1 detection behavior without the old full-inventory
   -- per-frame traversal: only IDs already known to be stolen are checked.
   for inventoryId, _ in pairs(trackedStolenInventoryIds) do
@@ -2472,7 +2587,9 @@ local function monitorRetrievedStolenVehicles(dtReal)
   end
 
   for inventoryId, pending in pairs(pendingSafePark) do
-    pending.timer = pending.timer - dtReal
+    -- A menu/loading pause must not consume the entire handoff window before
+    -- vehicle physics/controller updates have had a chance to run.
+    pending.timer = pending.timer - dtSim
     if pending.timer <= 0 then
       if be:getPlayerVehicleID(0) == pending.vehId then
         pendingSafePark[inventoryId] = nil
@@ -2516,11 +2633,21 @@ end
 
 local function onUpdate(dtReal, dtSim, dtRaw)
   dtReal = tonumber(dtReal) or 0
+  dtSim = tonumber(dtSim) or 0
+
+  for inventoryId, request in pairs(pendingStrips) do
+    if request.timer then request.timer = request.timer - dtReal end
+    if request.timer and request.timer <= 0 then
+      pendingStrips[inventoryId] = nil
+      log("E", logTag, "Strip condition request timed out for " .. tostring(inventoryId))
+      message("Vehicle condition check timed out. Stripping cancelled; try again after retrieval finishes.", 5)
+    end
+  end
 
   processPendingHotwire()
   processHotwireRelease(dtReal)
   processTrafficBackfill(dtReal)
-  monitorRetrievedStolenVehicles(dtReal)
+  monitorRetrievedStolenVehicles(dtSim)
   processPendingIdentityChanges(dtReal)
 
   -- Run the handoff guard before assigning/maintaining police pursuit.
@@ -2628,6 +2755,7 @@ local function onExtensionUnloaded()
   trackedStolenInventoryIds = {}
   observedSpawnedVehicles = {}
   pendingSafePark = {}
+  pendingStrips = {}
   cleanupSpawnedPoliceResponders()
   restoreSpeedTrapExemption()
   restoreWalkingModeWrapper()
@@ -2637,12 +2765,14 @@ M.isStolenInventoryVehicle = isStolenInventoryVehicle
 M.changeVehicleIdentity = changeVehicleIdentity
 M.changeVehicleVin = changeVehicleIdentity -- 0.2.0 compatibility alias
 M.stripVehicleForParts = stripVehicleForParts
+M.resolveStripConfirmation = resolveStripConfirmation
 M.hotwireSaleVehicle = function() return completeSaleVehicleHotwire(getHotwireCandidate()) end
 M.getConfig = function() return cfg end
 
 M.onVehicleDestroyed = onVehicleDestroyed
 M.onVehicleActiveChanged = onVehicleActiveChanged
 M.onVehicleAdded = onVehicleAdded
+M.onTeleportedToGarage = onTeleportedToGarage
 M.onComputerAddFunctions = onComputerAddFunctions
 M.onBeforeRadialOpened = onBeforeRadialOpened
 M.onQuickAccessLoaded = onQuickAccessLoaded
