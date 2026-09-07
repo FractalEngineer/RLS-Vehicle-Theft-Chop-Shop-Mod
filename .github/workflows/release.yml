@@ -1,0 +1,39 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v0.3.0"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install validation dependencies
+        run: python -m pip install Pillow lupa
+      - name: Check the tag matches the package version
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python -c "import json, os; assert os.environ['TAG'] == 'v' + json.load(open('mod_info/M3Z1BLS58/info.json', encoding='utf-8'))['version_string']"
+      - name: Validate the UI decorator
+        run: node tests/test_icons.cjs
+      - name: Validate and build the BeamNG package
+        run: python tools/validate_release.py --package
+      - name: Publish GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: .github/release-notes.md
+          files: releases/*.zip

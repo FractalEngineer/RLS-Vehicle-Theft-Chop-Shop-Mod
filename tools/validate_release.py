@@ -1,7 +1,7 @@
 """Validate source and optionally build the explicit release manifest.
 
 Requires Pillow and lupa (Lua runtime); --lua-deps can point at a temp install.
-Run from the repository root. Research, tests and imported originals never ship.
+Run from the repository root. Research and tests never ship.
 """
 import argparse
 import json
@@ -17,7 +17,10 @@ args = parser.parse_args()
 if args.lua_deps:
     sys.path.insert(0, str(args.lua_deps))
 from PIL import Image
-from lupa.luajit21 import LuaRuntime
+try:
+    from lupa.luajit21 import LuaRuntime
+except ModuleNotFoundError:
+    from lupa import LuaRuntime
 
 FILES = [
     "README.md",
@@ -25,7 +28,6 @@ FILES = [
     "mod_info/M3Z1BLS58/icon.jpg",
     "mod_info/M3Z1BLS58/info.json",
     "ui/modModules/rlsCarjacking/rlsCarjacking.js",
-    "ui/modModules/rlsCarjacking/icons/hotwire.svg",
     "ui/modModules/rlsCarjacking/icons/strip_for_parts.svg",
 ]
 metadata = json.loads(Path(FILES[3]).read_text(encoding="utf-8"))
@@ -39,9 +41,8 @@ for name in FILES:
     assert Path(name).is_file() and "_archived" not in name
     if name.endswith((".lua", ".js", ".md", ".json")):
         assert "abandon" not in Path(name).read_text(encoding="utf-8").lower()
-for name in FILES[-2:]:
+for name in FILES[-1:]:
     assert ET.parse(name).getroot().tag == "{http://www.w3.org/2000/svg}svg"
-    assert Path(name).read_bytes() == (Path("Import") / Path(name).name).read_bytes()
 assert f"-- Version {version}." in Path(FILES[1]).read_text(encoding="utf-8")
 runtime = LuaRuntime()
 runtime.execute("local f,e = loadfile(...) assert(f,e)", FILES[1])

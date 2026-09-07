@@ -2,7 +2,7 @@
 
 Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 
-Version **0.2.16**, updated for **RLS Career Overhaul 2.7.1**.
+Version **0.3.0**, updated for **RLS Career Overhaul 2.7.1**.
 
 ## Features
 
@@ -19,7 +19,7 @@ Version **0.2.16**, updated for **RLS Career Overhaul 2.7.1**.
 - Stolen vehicles have reduced market value until their identity is changed.
 - Hotwiring dealership vehicles applies a configurable dealer reputation penalty.
 - Retrieved stolen vehicles are detected immediately and repeatedly reset to a safe controller state during the short RLS retrieval handoff: AI disabled, driver inputs cleared, transmission in neutral, parking brake applied, starter off and ignition off. Physical vehicle damage is left intact.
-- Retrieved stolen vehicles can be **stripped for parts** from their garage computer menu for a heavily reduced payout, including totaled cars. Hotwire and Strip for Parts include custom icons.
+- Retrieved stolen vehicles can be **stripped for parts** from their garage computer menu for a heavily reduced payout, including totaled cars. Strip for Parts has a custom icon.
 
 ## Installation
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-**Current working build: v0.2.16, targeting RLS 2.7.1. Not yet verified in BeamNG.**
+**Current working build: v0.3.0, targeting RLS 2.7.1. Not yet verified in BeamNG.**
 
 v0.2.16 adds native Strip for Parts confirmation after the condition refresh, with vehicle name/ID, an exact quote, Cancel as default, and one-use request tokens. Confirmation rechecks ownership, availability, vehicle identity and quote. Ordinary purchased vehicles remain excluded. Successful identity changes now remove the synthetic meet-reputation discount immediately; older identity-changed saves are migrated once by the normal stolen-state enforcement pass. Later native meet-reputation changes are left alone. This supersedes the original requirement to retain the value penalty after identity change.
 
@@ -14,11 +14,11 @@ v0.2.15 changes:
 - Garage retrieval restarts the existing bounded safe-state guard on native `onTeleportedToGarage`, including same-object retrieval. Retries count simulation time, so paused menus cannot exhaust them. BeamNG's velocity-only cluster operation clears motion; queued vehicle commands skip vehicles the player has entered. The redundant separate ignition bridge request is removed.
 - Stripping accepts a valid zero valuation, normalizes numeric inventory IDs, checks availability, closes the menu for the live condition request, prevents duplicate/late transactions, and reports errors/timeouts. The reported no-op has not been reproduced in BeamNG; these address confirmed failure paths and make remaining failures observable.
 - Exact civilian replacement remains necessary: 2.7.1 still removes stolen entries without automatic one-for-one replenishment. Replacement debts are discarded when their native pool changes. Insertion no longer forces the native pool-wide activation pass.
-- Imported SVGs are bundled unchanged. Hotwire uses the radial menu's native path support; an isolated UI mod decorates the Strip for Parts computer tile because RLS 2.7.1 ignores Lua icon fields. No RLS/Vue files are overridden. The decorator depends on RLS's `.computer-function-tile`, `.label`, `.icon` markup and this add-on's English strip label.
+- An isolated UI mod decorates the Strip for Parts computer tile because RLS 2.7.1 ignores Lua icon fields. Hotwire uses the radial menu's native `lockOpened` icon. No RLS/Vue files are overridden. The decorator depends on RLS's `.computer-function-tile`, `.label`, `.icon` markup and this add-on's English strip label.
 
-Source inspected: installed `rls_career_overhaul_2.7.1.zip` and the current BeamNG Lua/UI files. Reference extraction and Lua test dependencies are under Windows TEMP, excluded from the release. `tools/validate_release.py --lua-deps <temporary-lupa-install> --package` runs loadfile/regression checks and builds the explicit seven-file manifest. `tests/test_icons.cjs` checks the scoped UI decorator.
+Source inspected: installed `rls_career_overhaul_2.7.1.zip` and the current BeamNG Lua/UI files. Reference extraction and Lua test dependencies are under Windows TEMP, excluded from the release. `tools/validate_release.py --lua-deps <temporary-lupa-install> --package` runs loadfile/regression checks and builds the explicit six-file manifest. `tests/test_icons.cjs` checks the scoped UI decorator.
 
-Runtime tests still required: stripping damaged/undamaged/totaled vehicles; store in D/manual gear with engine running and retrieve without entry (also retrieve an already-live car); verify neutral, engine/starter off, brake on, no movement, damage/paint/plate retained; verify both icons; repeated theft/store/sell/strip and a mission transition; normal taxi entry, police theft, pursuit completion, hotwire and identity/insurance matrix below.
+Runtime tests still required: stripping damaged/undamaged/totaled vehicles; store in D/manual gear with engine running and retrieve without entry (also retrieve an already-live car); verify neutral, engine/starter off, brake on, no movement, damage/paint/plate retained; verify the Strip for Parts icon and Hotwire's native open-lock icon; repeated theft/store/sell/strip and a mission transition; normal taxi entry, police theft, pursuit completion, hotwire and identity/insurance matrix below.
 
 **Current known-good baseline: v0.2.14**
 
@@ -48,7 +48,6 @@ lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
 ui/modModules/rlsCarjacking/rlsCarjacking.js
-ui/modModules/rlsCarjacking/icons/hotwire.svg
 ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
 
@@ -408,7 +407,6 @@ lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
 ui/modModules/rlsCarjacking/rlsCarjacking.js
-ui/modModules/rlsCarjacking/icons/hotwire.svg
 ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
 

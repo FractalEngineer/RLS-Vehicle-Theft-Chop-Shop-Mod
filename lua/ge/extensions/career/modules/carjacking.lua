@@ -1,6 +1,6 @@
 -- RLS Career Carjacking
 -- BeamNG.drive + RLS Career Overhaul carjacking extension.
--- Version 0.2.16.
+-- Version 0.3.0.
 
 local M = {}
 
@@ -1738,7 +1738,7 @@ local function registerHotwireQuickAccessEntry()
       if not candidate then return end
       table.insert(entries, {
         title = "Hotwire",
-        icon = "/ui/modModules/rlsCarjacking/icons/hotwire.svg",
+        icon = "lockOpened",
         priority = 52,
         subtitle = "Steal this vehicle",
         onSelect = function()

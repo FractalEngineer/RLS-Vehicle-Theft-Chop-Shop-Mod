@@ -24,7 +24,6 @@ lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
 ui/modModules/rlsCarjacking/rlsCarjacking.js
-ui/modModules/rlsCarjacking/icons/hotwire.svg
 ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
 
@@ -360,7 +359,6 @@ Before packaging:
    mod_info/M3Z1BLS58/icon.jpg
    mod_info/M3Z1BLS58/info.json
    ui/modModules/rlsCarjacking/rlsCarjacking.js
-   ui/modModules/rlsCarjacking/icons/hotwire.svg
    ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
    ```
 10. `zipfile.testzip()` must return `None`.
