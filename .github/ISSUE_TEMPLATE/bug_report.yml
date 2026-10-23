@@ -1,0 +1,205 @@
+name: Bug report
+description: Report a reproducible carjacking, traffic, garage, pursuit, or UI failure
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping test RLS Career Carjacking.
+
+        Before posting, update to the latest add-on and RLS versions, keep only one
+        copy of the add-on in the BeamNG `mods` folder, fully restart BeamNG, and
+        search existing issues for the same failure.
+
+        Incomplete reports without exact versions, reproduction steps, or logs
+        cannot be diagnosed reliably.
+
+  - type: input
+    id: beamng_version
+    attributes:
+      label: BeamNG.drive version
+      description: Use the exact build shown in-game or in BeamNG.drive.exe file properties.
+      placeholder: "0.40.3.0.290897"
+    validations:
+      required: true
+
+  - type: input
+    id: rls_version
+    attributes:
+      label: RLS Career Overhaul version
+      description: Use the version shown by RLS, not only the ZIP filename.
+      placeholder: "2.7.2"
+    validations:
+      required: true
+
+  - type: input
+    id: addon_version
+    attributes:
+      label: RLS Career Carjacking version
+      description: Enter the in-game/mod-manager version and exact ZIP filename, for example 0.3.1 and rls_carjacking_v0.3.1.zip.
+      placeholder: "0.3.1 / rls_carjacking_v0.3.1.zip"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install_state
+    attributes:
+      label: Installation state
+      description: Confirm how the add-on is installed.
+      options:
+        - One add-on ZIP in the BeamNG mods folder
+        - One unpacked add-on folder
+        - More than one carjacking ZIP/folder is present
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: game_context
+    attributes:
+      label: Career and map context
+      description: State the map, garage/dealership, and whether this is a new or existing career save.
+      placeholder: "Existing career save, West Coast, garage retrieval"
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What failed?
+      description: Describe the failure in one or two direct sentences.
+      placeholder: "The Strip for Parts result never appears after selecting the vehicle."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Exact reproduction steps
+      description: Start from a clean game launch and list every action, including the control used and the order of garage/menu actions.
+      placeholder: |
+        1. Load an existing career save at West Coast.
+        2. Steal an ambient D-Series.
+        3. Store the vehicle and retrieve it.
+        4. Open the garage computer and select Strip for Parts.
+        5. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened instead? Include visible error text and whether the game menu or vehicle controls remained usable.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      description: How often can the failure be repeated with the steps above?
+      options:
+        - Every time
+        - Often
+        - Sometimes
+        - Happened once
+        - Not tested after the first failure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: affected_areas
+    attributes:
+      label: Affected areas
+      description: Select every area involved in the failure.
+      options:
+        - label: Traffic carjacking
+        - label: Taxi entry or dispatch
+        - label: Sale-vehicle hotwire
+        - label: Strip for Parts
+        - label: Garage retrieval or safe parked state
+        - label: Change Vehicle Identity or insurance
+        - label: Police theft or pursuit
+        - label: Vehicle value, year, mileage, paint, or plate
+        - label: UI, action wheel, or garage computer
+        - label: Traffic restoration or population
+        - label: Lua error, menu failure, or crash
+    validations:
+      required: true
+
+  - type: dropdown
+    id: save_impact
+    attributes:
+      label: Save impact
+      description: State whether the problem affects an existing career save.
+      options:
+        - Reproduces in both new and existing careers
+        - Existing career save only
+        - New career save only
+        - The save can no longer be loaded or saved
+        - Not tested
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: BeamNG log evidence
+      description: |
+        Open `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\beamng.log` after the
+        failure. Provide the timestamp and the relevant error/traceback lines,
+        or attach the complete log as a file.
+      placeholder: |
+        Timestamp:
+        Relevant error/traceback:
+        Stack trace:
+    validations:
+      required: true
+
+  - type: textarea
+    id: enabled_mods
+    attributes:
+      label: Enabled mods
+      description: List all enabled add-ons and RLS submods. Mention test builds or unpacked mods explicitly.
+      placeholder: |
+        RLS Career Overhaul 2.7.2
+        RLS Career Collection 5.5.1
+        RLS Career Carjacking 0.3.1
+        SimpleNG 1.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional diagnostics
+      description: Include the vehicle model/configuration, inventory ID, pursuit state, traffic role, or the last action before the failure when known.
+      placeholder: "Vehicle: fullsize / bcpd; inventory ID: 14; pursuit mode: 0"
+
+  - type: textarea
+    id: config_changes
+    attributes:
+      label: Configuration changes
+      description: List any values changed in the carjacking `cfg` table or relevant BeamNG traffic/settings options.
+      placeholder: "No changes"
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Report checklist
+      options:
+        - label: I tested with the latest available add-on and RLS versions.
+          required: true
+        - label: I searched existing issues for the same failure.
+          required: true
+        - label: I removed or redacted personal paths/usernames from attached logs where possible.
+          required: true

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Installation and usage
+    url: https://github.com/FractalEngineer/RLS-Vehicle-Theft-Chop-Shop-Mod/blob/main/README.md
+    about: Read installation, feature, configuration, and runtime-test guidance before reporting a problem.
+  - name: Latest release
+    url: https://github.com/FractalEngineer/RLS-Vehicle-Theft-Chop-Shop-Mod/releases/latest
+    about: Confirm that you are testing the latest published add-on build.

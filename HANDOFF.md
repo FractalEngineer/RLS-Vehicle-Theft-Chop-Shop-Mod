@@ -2,7 +2,26 @@
 
 ## Status
 
-**Current working build: v0.3.0, targeting RLS 2.7.1. Not yet verified in BeamNG.**
+**Current working build: v0.3.1, targeting BeamNG.drive 0.40.3 and RLS 2.7.2. Runtime testing failed on 2026-10-23.**
+
+**Blocked pending:** an RLS Career Overhaul update compatible with BeamNG.drive 0.40. Do not publish or tag v0.3.1 until that RLS update is installed and the full runtime matrix passes.
+
+v0.3.1 issue-tracker work:
+- Re-audited installed RLS 2.7.2 after the latest user update.
+- Excluded `simple_traffic` shells and applied full-detail traffic while the add-on is active. RLS 2.7.2 does not solve the shell-into-inventory valuation problem itself.
+- Preserved dealership year/mileage during hotwire and generated a valid year plus age-consistent mileage for street traffic.
+- Persisted and reconciled laundered paint/plate state across recovery, respawn, part-condition refresh, and garage repair.
+- Kept RLS 2.7.2's intentional low-weight `joesjunkcar` traffic behavior instead of restoring the 2.7.1 workaround.
+- Issue #3 (post-sale `parkingSpot` stale object route) still needs the reporter's game log and reproduction; the current report does not identify a carjacking-owned object or call path.
+- Issue #4 contains no version, log, or reproduction details and cannot be diagnosed yet.
+- User runtime testing with BeamNG.drive 0.40.3 and RLS 2.7.2 was unsuccessful. No further mechanism should be guessed until the updated RLS integration is available for inspection.
+
+v0.3.1 compatibility changes:
+- Inspected BeamNG.drive 0.40.3 build 290897 and installed RLS 2.7.1.
+- Excluded 0.40 provider-reserved and claimed traffic from carjacking. Native taxis use the new reserved traffic lifecycle and must not be consumed by this add-on.
+- Removed `career_modules_inspectVehicle`, `career_modules_vehicleShopping`, and `career_modules_payment` from hard dependencies. They are optional at load and already accessed defensively at runtime, avoiding 0.40/RLS load-order blocking.
+- Used 0.40's native cancel, confirm, and destructive roles on the Strip for Parts confirmation buttons.
+- Confirmed the remaining native contracts used by the module still exist in 0.40.3: walking blacklist/entry hooks, traffic insertion/removal, active vehicle pooling, career inventory/save callbacks, garage teleport hook, speed-trap hooks, and confirmation dialogs.
 
 v0.2.16 adds native Strip for Parts confirmation after the condition refresh, with vehicle name/ID, an exact quote, Cancel as default, and one-use request tokens. Confirmation rechecks ownership, availability, vehicle identity and quote. Ordinary purchased vehicles remain excluded. Successful identity changes now remove the synthetic meet-reputation discount immediately; older identity-changed saves are migrated once by the normal stolen-state enforcement pass. Later native meet-reputation changes are left alone. This supersedes the original requirement to retain the value penalty after identity change.
 

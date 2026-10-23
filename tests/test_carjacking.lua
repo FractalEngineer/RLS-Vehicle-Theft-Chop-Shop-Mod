@@ -1,6 +1,13 @@
 -- Run from repository root with Lua 5.1+ (or tools/validate_release.py).
 local sourcePath = "lua/ge/extensions/career/modules/carjacking.lua"
 assert(loadfile(sourcePath))
+local function deepCopy(value)
+  if type(value) ~= "table" then return value end
+  local copy = {}
+  for key, item in pairs(value) do copy[key] = deepCopy(item) end
+  return copy
+end
+deepcopy = deepCopy
 local function upvalue(fn, name)
   for i = 1, 100 do
     local key, value = debug.getupvalue(fn, i)
@@ -63,6 +70,7 @@ s.callback()
 s.callback()
 assert(s.sales == 0, "condition callback must only show a confirmation")
 assert(s.dialog.buttons[1].default and s.dialog.buttons[1].isCancel)
+assert(s.dialog.buttons[2].isConfirm and s.dialog.buttons[2].isDestructive)
 assert(s.dialog.text:find("$500", 1, true) and s.dialog.text:find("#7", 1, true))
 s.confirm(true)
 s.confirm(true)
@@ -220,10 +228,92 @@ backfill(1)
 backfill(1)
 assert(spawned == 1 and next(debts) == nil and not pool._updateFlag)
 
+-- BeamNG 0.40 reserved/claimed provider traffic is not carjackable.
+gameplay_walk = {
+  toggleWalkingMode = function() end,
+  isWalking = function() return false end,
+  getVehicleInFront = function() return nil end,
+}
+s.mod.onExtensionLoaded()
+local installWalkingMode = upvalue(s.mod.onExtensionLoaded, "installWalkingModeWrapper")
+local walkingWrapper = upvalue(installWalkingMode, "wrappedToggleWalkingMode")
+local findTarget = upvalue(walkingWrapper, "findJackTarget")
+local isJackableTraffic = upvalue(findTarget, "isJackableTrafficVehicle")
+local reservedTraffic = upvalue(isJackableTraffic, "isReservedTrafficVehicle")
+assert(reservedTraffic({isAi = true, reserved = "taxi"}))
+assert(reservedTraffic({isAi = true, claimed = "taxi"}))
+assert(not reservedTraffic({isAi = true}))
+gameplay_walk.isVehicleBlacklisted = function() return true end
+s.objects[81] = {
+  getActive = function() return true end,
+  getJBeamFilename = function() return "simple_traffic" end,
+}
+assert(not isJackableTraffic(81, {isAi = true}, true), "shell traffic cannot become inventory")
+s.objects[81].getJBeamFilename = function() return "etk800" end
+assert(isJackableTraffic(81, {isAi = true}, true))
+settings = {
+  value = true,
+  getValue = function(name)
+    assert(name == "trafficSimpleVehicles")
+    return settings.value
+  end,
+  setValue = function(name, value)
+    assert(name == "trafficSimpleVehicles")
+    settings.value = value
+  end,
+}
+local ensureFullDetail = upvalue(s.mod.onExtensionLoaded, "ensureFullDetailTrafficVehicles")
+local restoreFullDetail = upvalue(s.mod.onExtensionUnloaded, "restoreFullDetailTrafficVehicleSetting")
+assert(ensureFullDetail() and settings.value == false)
+assert(restoreFullDetail() and settings.value == true)
+
+-- Street vehicle identity is restored after RLS's later part-inventory hook.
+s = fixture(100)
+s.vehicles[7].rlsCarjack.source = "streetTraffic"
+s.vehicles[7].rlsCarjack.streetGeneratedYear = 1987
+s.vehicles[7].rlsCarjack.streetGeneratedMileage = 123456789
+s.vehicles[7].year = 2026
+s.vehicles[7].mileage = 0
+s.mod.onAddedVehiclePartsToInventory(7, {})
+local restoreStreet = upvalue(s.mod.onUpdate, "pendingStreetIdentityRestore")
+assert(restoreStreet[7])
+s.vehicles[7].year = 2026
+s.mod.onUpdate(0.1, 0.1)
+assert(s.vehicles[7].year == 1987 and s.vehicles[7].mileage == 123456789)
+assert(restoreStreet[7] == nil)
+
+-- A recovered laundered car keeps the new identity unless the player has
+-- deliberately repainted it to a different legitimate colour.
+s = fixture(100)
+local vehicle = s.vehicles[7]
+local prePaint = {baseColor = {0.1, 0.2, 0.3, 1}}
+local newPaint = {baseColor = {0.7, 0.8, 0.9, 1}}
+local laterPaint = {baseColor = {0.2, 0.6, 0.4, 1}}
+vehicle.config = {}
+vehicle.config.paints = {prePaint, prePaint, prePaint}
+vehicle.rlsCarjack = {
+  stolen = true,
+  identityChanged = true,
+  identityPaintRecoveryInitialized = true,
+  changedIdentityPlate = "NEW-123",
+  preIdentityPaints = {prePaint, prePaint, prePaint},
+  changedIdentityPaints = {newPaint, newPaint, newPaint},
+}
+career_modules_inventory.setVehicleDirty = function() end
+s.mod.onVehiclePartConditionsChanged(7)
+assert(vehicle.config.licenseName == "NEW-123")
+assert(vehicle.config.paints[1].baseColor[1] == 0.7)
+vehicle.config.paints = {laterPaint, laterPaint, laterPaint}
+s.mod.onVehiclePartConditionsChanged(7)
+assert(vehicle.config.paints[1].baseColor[1] == 0.2, "later legitimate repaint must survive")
+s.mod.onTeleportedToGarage("garage", s.objects[70])
+local restoreLaundered = upvalue(s.mod.onUpdate, "pendingLaunderedIdentityRestore")
+assert(restoreLaundered[7], "garage recovery must restart identity reconciliation")
+
 -- Identity completion restores normal reputation once, including old saves.
 s = fixture(100)
 local discount = upvalue(s.mod.onVehicleAdded, "applyStolenMarketDiscount")
-local vehicle = s.vehicles[7]
+vehicle = s.vehicles[7]
 local data = vehicle.rlsCarjack
 local dirty = 0
 career_modules_inventory.setVehicleDirty = function() dirty = dirty + 1 end

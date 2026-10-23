@@ -2,20 +2,27 @@
 
 Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 
-Version **0.3.0**, updated for **RLS Career Overhaul 2.7.1**.
+Version **0.3.1**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul 2.7.2**.
+
+> **Compatibility status:** runtime testing on BeamNG.drive 0.40.3 with RLS 2.7.2
+> failed on 2026-10-23. This source remains unpublished and is waiting for an RLS
+> update compatible with BeamNG.drive 0.40 before further runtime validation.
 
 ## Features
 
 - Steal live AI traffic using the normal **Enter/Exit Vehicle** control.
 - Vehicles that BeamNG/RLS exposes as normal walking-mode entry targets are never intercepted by carjacking. This keeps called passenger taxis and other legitimate service/scripted vehicles on their native Enter/Exit interaction.
 - Carjacking leaves BeamNG/RLS traffic management in control. When a stolen civilian traffic vehicle later leaves the active world, the mod restores exactly that one removed traffic entry with the same model/configuration. If RLS has rebuilt the traffic pool in the meantime, that new population takes precedence.
+- Provider-reserved traffic, including taxis dispatched by BeamNG's native traffic system, is never selected for carjacking and stays under its native lifecycle.
 - Hotwire inspected vehicles for sale from the action wheel outside an active test drive; the vehicle is released and started when the hotwire completes.
 - Police vehicles can be stolen and trigger maximum police heat.
 - Stolen vehicles keep their configuration, damage, paint and license plate when first stolen.
+- Stolen street traffic receives a model-appropriate year and age-consistent mileage; hotwired dealership vehicles keep the seller's year and mileage.
 - Stolen vehicles cannot be insured until their vehicle identity is changed, and do not receive automated speed-camera or red-light-camera fines.
 - Eligible stolen vehicles can use **Change Vehicle Identity** from their garage vehicle menu. The service randomizes the paint and license plate, clears future stolen-vehicle identification and makes the vehicle eligible for normal RLS insurance again.
 - Stolen police vehicles cannot have their identity changed.
 - Stolen vehicle identity becomes known to police after a delay and can trigger a pursuit when the vehicle is recognized nearby.
+- Changed identity paint and plate state is retained through garage recovery, respawning, and repair.
 - Stolen vehicles have reduced market value until their identity is changed.
 - Hotwiring dealership vehicles applies a configurable dealer reputation penalty.
 - Retrieved stolen vehicles are detected immediately and repeatedly reset to a safe controller state during the short RLS retrieval handoff: AI disabled, driver inputs cleared, transmission in neutral, parking brake applied, starter off and ignition off. Physical vehicle damage is left intact.
@@ -79,6 +86,7 @@ After changing a value, save the file and fully restart BeamNG before testing it
 | `stolenValueMultiplier` | `0.35` | Multiplier applied to a stolen vehicle's normal market value. `0.35` means 35% of normal value. |
 | `stripPartsMultiplier` | `0.05` | Fraction of current vehicle value paid when using **Strip for Parts**. `0.05` means a 5% payout. |
 | `allowPoliceVehicles` | `true` | Set to `false` to prevent police vehicles from being stolen. |
+| `requireFullDetailTrafficVehicles` | `true` | Keeps simplified traffic shells out of career inventory and disables BeamNG's simplified-traffic option while the add-on is active. Set to `false` to accept shell vehicles with placeholder parts and values. |
 | `allowSaleVehicleHotwire` | `true` | Enables the **Hotwire** action for inspected vehicles that are for sale. |
 | `allowPrivateSellerHotwire` | `true` | Allows vehicles from private marketplace sellers to be hotwired. |
 | `dealerHotwireReputationPenalty` | `500` | Reputation points deducted from a dealership's associated organization after a successful hotwire. Set to `0` to disable the reputation penalty. |

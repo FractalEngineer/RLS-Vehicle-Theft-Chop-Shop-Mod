@@ -1,6 +1,6 @@
 -- RLS Career Carjacking
 -- BeamNG.drive + RLS Career Overhaul carjacking extension.
--- Version 0.3.0.
+-- Version 0.3.1.
 
 local M = {}
 
@@ -10,9 +10,6 @@ M.dependencies = {
   "career_career",
   "career_saveSystem",
   "career_modules_inventory",
-  "career_modules_inspectVehicle",
-  "career_modules_vehicleShopping",
-  "career_modules_payment",
   "gameplay_walk",
   "gameplay_traffic"
 }
@@ -35,6 +32,10 @@ local cfg = {
   stolenValueMultiplier = 0.35,
   stripPartsMultiplier = 0.05,
   allowPoliceVehicles = true,
+
+  -- Shell traffic cannot become a valid career vehicle: it has placeholder
+  -- parts and may be worth only a few hundred dollars even after laundering.
+  requireFullDetailTrafficVehicles = true,
 
   -- Sale-vehicle hotwiring. The action only appears while the player is
   -- sitting in an inspected-for-sale vehicle outside an active test drive.
@@ -108,11 +109,15 @@ local pendingImmediateAlert
 local carjackArrestGrace = {}
 local pendingPaintRestore
 local pendingInventoryPaintSnapshots = {}
+local pendingStreetIdentityRestore = {}
+local pendingLaunderedIdentityRestore = {}
 local pendingCareerSaveTimer
 local identityScanTimer = 0
 local insuranceCleanupTimer = 0
 local maximumHeatTimer = 0
 local identityChangeProcessTimer = 0
+local originalTrafficSimpleVehicles
+local trafficSimpleVehiclesChanged = false
 
 -- Removing a live AI car from gameplay_traffic also removes it from BeamNG's
 -- native pool.  Keep one tiny replacement record for that exact civilian car.
@@ -421,8 +426,15 @@ local function isNativeTrafficOnlyVehicle(vehId, obj)
   return false
 end
 
+-- BeamNG 0.40 uses reserved/claimed traffic entries for provider-owned vehicles
+-- such as dispatched taxis. They must stay under their native lifecycle.
+local function isReservedTrafficVehicle(trafficData)
+  return type(trafficData) == "table" and (trafficData.reserved ~= nil or trafficData.claimed ~= nil)
+end
+
 local function isJackableTrafficVehicle(vehId, trafficData, ignoreSpeed)
   if not vehId or type(trafficData) ~= "table" or not trafficData.isAi then return false end
+  if isReservedTrafficVehicle(trafficData) then return false end
   if career_modules_inventory.getInventoryIdFromVehicleId and career_modules_inventory.getInventoryIdFromVehicleId(vehId) then
     return false
   end
@@ -436,6 +448,7 @@ local function isJackableTrafficVehicle(vehId, trafficData, ignoreSpeed)
 
   local okJBeam, jbeam = pcall(function() return obj:getJBeamFilename() end)
   if okJBeam and jbeam == "unicycle" then return false end
+  if okJBeam and jbeam == "simple_traffic" and cfg.requireFullDetailTrafficVehicles then return false end
 
   if not cfg.allowPoliceVehicles and isPoliceTrafficVehicle(trafficData) then return false end
   if not ignoreSpeed and getVehicleSpeed(obj) > cfg.maxTargetSpeedMps then return false end
@@ -463,6 +476,93 @@ local function findJackTarget(ignoreSpeed)
   end
 
   return bestId, bestDist, bestIsPolice
+end
+
+local function randomGauss3Unit()
+  return (math.random() + math.random() + math.random()) / 3
+end
+
+local function getEligibleConfigInfo(model, configName)
+  if not model or not configName then return nil end
+  if util_configListGenerator and util_configListGenerator.getEligibleVehicles then
+    local ok, eligible = pcall(function()
+      return util_configListGenerator.getEligibleVehicles(false, false) or {}
+    end)
+    if ok and type(eligible) == "table" then
+      local wanted = tostring(configName):gsub("%.pc$", "")
+      for _, info in ipairs(eligible) do
+        if type(info) == "table" and info.model_key == model then
+          local key = tostring(info.key or ""):gsub("%.pc$", "")
+          if key == wanted then return info end
+        end
+      end
+    end
+  end
+
+  if core_vehicles and core_vehicles.getConfig then
+    local ok, info = pcall(function() return core_vehicles.getConfig(model, configName) end)
+    if ok then return info end
+  end
+end
+
+local function getStreetVehicleAgeData(vehId, snapshot)
+  local obj = vehId and getObjectByID(vehId) or nil
+  local model = obj and obj.JBeam or nil
+  local configPath = snapshot and snapshot.config and snapshot.config.partConfigFilename or nil
+  local configName
+  if type(configPath) == "string" then
+    local ok, _, name = pcall(path.splitWithoutExt, configPath)
+    if ok then configName = name end
+  end
+
+  local info = getEligibleConfigInfo(model, configName)
+  local years = type(info) == "table" and (info.Years or
+    (type(info.aggregates) == "table" and info.aggregates.Years or nil)) or nil
+  local minYear = type(years) == "table" and tonumber(years.min) or nil
+  local maxYear = type(years) == "table" and tonumber(years.max) or nil
+
+  local currentYear = tonumber(os.date("%Y")) or 2026
+  local year
+  if minYear and maxYear and minYear <= maxYear then
+    local firstYear = math.max(1900, math.floor(minYear))
+    local lastYear = math.min(currentYear, math.floor(maxYear))
+    year = math.random(firstYear, math.max(firstYear, lastYear))
+  else
+    year = tonumber(info and info.year) or currentYear
+  end
+
+  -- Mirror RLS's age-driven used-car profile closely enough that stolen
+  -- traffic receives a plausible odometer instead of a fresh 0 km state.
+  local age = math.max(0, currentYear - year)
+  local annualMiles = 11500
+  local expectedMiles = age <= 25 and age * annualMiles or 25 * annualMiles + (age - 25) * 2500
+  local miles
+  if age >= 25 and math.random() < 0.015 then
+    miles = 5000 + randomGauss3Unit() * 15000
+  else
+    local factor = 0.75 + randomGauss3Unit() * 0.80
+    miles = expectedMiles * factor
+    if age == 0 then
+      miles = math.max(50, math.min(miles, 15000))
+    elseif age >= 15 then
+      miles = math.max(miles, 500)
+    end
+    miles = math.max(500, math.min(miles, 350000))
+    if miles >= 300000 then miles = 300000 - math.random() * 30000 end
+  end
+
+  return year, math.max(0, miles * 1609.344)
+end
+
+local function seedStreetVehicleMileage(vehId, mileage)
+  local obj = vehId and getObjectByID(vehId) or nil
+  if not obj or not obj.queueLuaCommand or not mileage then return false end
+  pcall(function()
+    obj:queueLuaCommand(string.format(
+      "if partCondition and partCondition.ensureConditionsInit then partCondition.ensureConditionsInit(%d) end",
+      math.floor(mileage + 0.5)))
+  end)
+  return true
 end
 
 -- Snapshot the live traffic configuration before removing the vehicle from
@@ -978,6 +1078,8 @@ local function policeCommittedToOtherPursuit(policeVeh, targetId)
   return pursuitMode > 0 and otherTarget ~= nil and otherTarget ~= targetId
 end
 
+local reassertChangedIdentity
+
 local function resetPursuitTimers(trafficData, clearMode)
   if not trafficData or type(trafficData.pursuit) ~= "table" then return end
   local pursuit = trafficData.pursuit
@@ -991,6 +1093,41 @@ local function resetPursuitTimers(trafficData, clearMode)
     pursuit.timers.evade = clearMode and 0 or (pursuit.timers.evade or 0)
     pursuit.timers.arrestValue = 0
   end
+end
+
+local function clearRecoveredLaunderedPursuit(vehId)
+  local traffic = gameplay_traffic and gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
+  local targetTraffic = traffic and traffic[vehId] or nil
+  if not targetTraffic then return false end
+
+  local police = getPoliceModule()
+  local pursuitMode = targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
+  local roleName = getVehicleRoleName(targetTraffic)
+  if (pursuitMode > 0 or roleName == "suspect") and police and police.setPursuitMode then
+    pcall(function() police.setPursuitMode(0, vehId, {}) end)
+    targetTraffic = (gameplay_traffic.getTrafficData() or {})[vehId] or targetTraffic
+  end
+
+  resetPursuitTimers(targetTraffic, true)
+  if getVehicleRoleName(targetTraffic) == "suspect" and targetTraffic.setRole then
+    pcall(function() targetTraffic:setRole("standard") end)
+  end
+  return true
+end
+
+local function scheduleLaunderedIdentityRestore(inventoryId, vehId)
+  local data = inventoryId and getCarjackData(inventoryId) or nil
+  if not data or (data.identityChanged ~= true and data.vinChanged ~= true) then return false end
+  if not vehId or not getObjectByID(vehId) then return false end
+
+  reassertChangedIdentity(inventoryId, vehId, true)
+  clearRecoveredLaunderedPursuit(vehId)
+  pendingLaunderedIdentityRestore[inventoryId] = {
+    vehId = vehId,
+    timer = 0.08,
+    attempts = 10
+  }
+  return true
 end
 
 -- Once the stolen vehicle is inserted back into traffic as the player car,
@@ -1281,6 +1418,8 @@ local function completeCarjack(vehId, wasPoliceVehicle)
   -- name before traffic teardown.
   local snapshot = captureVehicleSnapshot(vehId, obj)
   local nativeDisplayName = getNativeVehicleDisplayName(nil, nil, vehId)
+  local streetYear, streetMileage = getStreetVehicleAgeData(vehId, snapshot)
+  seedStreetVehicleMileage(vehId, streetMileage)
 
   if gameplay_traffic.removeTraffic then
     pcall(function() gameplay_traffic.removeTraffic(vehId, true) end)
@@ -1312,6 +1451,9 @@ local function completeCarjack(vehId, wasPoliceVehicle)
   local vehicle = getInventoryVehicle(inventoryId)
   if not vehicle then return false end
 
+  vehicle.year = streetYear or vehicle.year
+  vehicle.mileage = streetMileage or vehicle.mileage or 0
+
   -- RLS addVehicle keeps a live config reference. Replace it with our pre-
   -- traffic-removal snapshot so random traffic paints/parts survive ownership.
   if snapshot and type(snapshot.config) == "table" then
@@ -1338,7 +1480,10 @@ local function completeCarjack(vehId, wasPoliceVehicle)
     immediateAlertSent = false,
     policeVehicleTheft = wasPoliceVehicle == true,
     maximumHeat = wasPoliceVehicle == true,
-    marketValueMultiplier = cfg.stolenValueMultiplier
+    marketValueMultiplier = cfg.stolenValueMultiplier,
+    source = "streetTraffic",
+    streetGeneratedYear = streetYear,
+    streetGeneratedMileage = streetMileage
   }
   if nativeDisplayName then
     vehicle.niceName = nativeDisplayName
@@ -1605,6 +1750,12 @@ local function completeSaleVehicleHotwire(candidate)
 
   local vehicle = getInventoryVehicle(inventoryId)
   if not vehicle then return false end
+
+  local saleInfo = candidate.vehicleInfo or {}
+  local saleMileage = tonumber(saleInfo.Mileage)
+  local saleYear = tonumber(saleInfo.year)
+  if saleMileage and saleMileage >= 0 then vehicle.mileage = saleMileage end
+  if saleYear then vehicle.year = saleYear end
 
   if snapshot and type(snapshot.config) == "table" then
     local okCopy, configCopy = pcall(function() return deepcopy(snapshot.config) end)
@@ -1985,6 +2136,153 @@ local function paintsVisuallyEqual(a, b)
   return true
 end
 
+local function paintArraysEqual(a, b)
+  if type(a) ~= "table" or type(b) ~= "table" then return false end
+  for paintIndex = 1, 3 do
+    if not paintsVisuallyEqual(a[paintIndex] or a[1], b[paintIndex] or b[1]) then
+      return false
+    end
+  end
+  return true
+end
+
+local function getChangedIdentityPaints(vehicle, data)
+  if type(data) ~= "table" or type(vehicle) ~= "table" then return nil end
+  if type(data.changedIdentityPaints) == "table" and data.changedIdentityPaints[1] then
+    return deepcopy(data.changedIdentityPaints)
+  end
+
+  local paintName = data.changedIdentityPaint
+  if not paintName or not vehicle.model or not core_vehicles or not core_vehicles.getModel then return nil end
+  local okModel, modelData = pcall(function() return core_vehicles.getModel(vehicle.model) end)
+  local paint = okModel and modelData and modelData.model and modelData.model.paints
+    and modelData.model.paints[paintName] or nil
+  if type(paint) ~= "table" then return nil end
+
+  local paints = {deepcopy(paint), deepcopy(paint), deepcopy(paint)}
+  data.changedIdentityPaints = deepcopy(paints)
+  return paints
+end
+
+local function getRepresentativePartPaints(vehicle, excludePaints)
+  if not vehicle or type(vehicle.partConditions) ~= "table" then return nil end
+  for _, condition in pairs(vehicle.partConditions) do
+    local paintState = type(condition) == "table" and condition.visualState
+      and condition.visualState.paint or nil
+    local paints = paintState and paintState.originalPaints or nil
+    if type(paints) == "table" and paints[1]
+      and (not excludePaints or not paintArraysEqual(paints, excludePaints)) then
+      return deepcopy(paints)
+    end
+  end
+  return nil
+end
+
+local function initializeChangedIdentityPaintRecovery(vehicle, data)
+  if not vehicle or not data or data.identityPaintRecoveryInitialized == true then return false end
+
+  local identityPaints = getChangedIdentityPaints(vehicle, data)
+  if type(identityPaints) ~= "table" or not identityPaints[1] then
+    data.identityPaintRecoveryInitialized = true
+    return false
+  end
+
+  vehicle.config = vehicle.config or {}
+  local currentPaints = vehicle.config.paints
+  if type(currentPaints) == "table" and currentPaints[1] and not paintArraysEqual(currentPaints, identityPaints) then
+    data.preIdentityPaints = deepcopy(currentPaints)
+  elseif type(data.preIdentityPaints) ~= "table" or not data.preIdentityPaints[1] then
+    data.preIdentityPaints = getRepresentativePartPaints(vehicle, identityPaints)
+  end
+
+  vehicle.config.paints = deepcopy(identityPaints)
+  if type(vehicle.partConditions) == "table" then
+    for _, condition in pairs(vehicle.partConditions) do
+      local paintState = type(condition) == "table" and condition.visualState
+        and condition.visualState.paint or nil
+      if paintState then paintState.originalPaints = deepcopy(identityPaints) end
+    end
+  end
+
+  data.identityPaintRecoveryInitialized = true
+  return true
+end
+
+reassertChangedIdentity = function(inventoryId, vehId, applyLive)
+  local data, vehicle = getCarjackData(inventoryId)
+  if not data or not vehicle or not data.stolen then return false end
+  if data.identityChanged ~= true and data.vinChanged ~= true then return false end
+
+  local changed = initializeChangedIdentityPaintRecovery(vehicle, data)
+  local changedPlate = tostring(data.changedIdentityPlate or "")
+  if changedPlate ~= "" and tostring(vehicle.config.licenseName or "") ~= changedPlate then
+    vehicle.config.licenseName = changedPlate
+    changed = true
+  end
+
+  local identityPaints = getChangedIdentityPaints(vehicle, data)
+  local currentPaints = vehicle.config.paints
+  local paintStateChanged = false
+  if (type(currentPaints) ~= "table" or not currentPaints[1])
+    and type(identityPaints) == "table" and identityPaints[1] then
+    currentPaints = deepcopy(identityPaints)
+    vehicle.config.paints = deepcopy(currentPaints)
+    changed = true
+    paintStateChanged = true
+  elseif type(identityPaints) == "table" and identityPaints[1]
+    and type(data.preIdentityPaints) == "table" and data.preIdentityPaints[1]
+    and paintArraysEqual(currentPaints, data.preIdentityPaints)
+    and not paintArraysEqual(currentPaints, identityPaints) then
+    currentPaints = deepcopy(identityPaints)
+    vehicle.config.paints = deepcopy(currentPaints)
+    changed = true
+    paintStateChanged = true
+  end
+
+  local preIdentityPaints = data.preIdentityPaints
+  if type(currentPaints) == "table" and currentPaints[1]
+    and type(preIdentityPaints) == "table" and preIdentityPaints[1]
+    and type(vehicle.partConditions) == "table" then
+    for _, condition in pairs(vehicle.partConditions) do
+      local paintState = type(condition) == "table" and condition.visualState
+        and condition.visualState.paint or nil
+      if paintState and type(paintState.originalPaints) == "table"
+        and paintArraysEqual(paintState.originalPaints, preIdentityPaints)
+        and not paintArraysEqual(paintState.originalPaints, currentPaints) then
+        paintState.originalPaints = deepcopy(currentPaints)
+        changed = true
+        paintStateChanged = true
+      end
+    end
+  end
+
+  if changed then markVehicleDirty(inventoryId) end
+
+  if applyLive then
+    vehId = vehId or (career_modules_inventory.getVehicleIdFromInventoryId
+      and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId)) or nil
+    local obj = vehId and getObjectByID(vehId) or nil
+    if obj then
+      if changedPlate ~= "" then
+        if core_vehicles and core_vehicles.setPlateText then
+          pcall(function() core_vehicles.setPlateText(changedPlate, vehId) end)
+        elseif obj.setDynDataFieldbyName then
+          pcall(function() obj:setDynDataFieldbyName("licenseText", 0, changedPlate) end)
+        end
+      end
+
+      if paintStateChanged and type(vehicle.partConditions) == "table" then
+        if core_vehicleBridge and core_vehicleBridge.executeAction then
+          pcall(function()
+            core_vehicleBridge.executeAction(obj, "initPartConditions", vehicle.partConditions, 0, 1, 1)
+          end)
+        end
+      end
+    end
+  end
+  return changed
+end
+
 local function chooseRandomIdentityPaint(vehicle)
   if not vehicle or not vehicle.model or not core_vehicles or not core_vehicles.getModel then return nil end
   local okModel, modelData = pcall(function() return core_vehicles.getModel(vehicle.model) end)
@@ -2022,7 +2320,7 @@ local function applyRandomIdentityPaint(inventoryId, vehicle)
   local liveId = career_modules_inventory.getVehicleIdFromInventoryId
     and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
   persistStolenPaints(inventoryId, liveId, snapshot)
-  return paintName
+  return paintName, paints
 end
 
 local function fallbackRandomPlateText()
@@ -2079,7 +2377,14 @@ local function finalizeVehicleIdentityChange(inventoryId, paidCost)
   end
   if data.identityChanged or data.vinChanged then return true end
 
-  local paintName = applyRandomIdentityPaint(inventoryId, vehicle)
+  local preIdentityPaints = vehicle.config and vehicle.config.paints or nil
+  if type(preIdentityPaints) == "table" and preIdentityPaints[1] then
+    data.preIdentityPaints = deepcopy(preIdentityPaints)
+  else
+    data.preIdentityPaints = getRepresentativePartPaints(vehicle)
+  end
+
+  local paintName, identityPaints = applyRandomIdentityPaint(inventoryId, vehicle)
   local newPlate = applyRandomIdentityPlate(inventoryId, vehicle)
 
   data.identityChanged = true
@@ -2090,6 +2395,8 @@ local function finalizeVehicleIdentityChange(inventoryId, paidCost)
   data.identityChangePaidCost = nil
   data.changedIdentityPlate = newPlate
   data.changedIdentityPaint = paintName
+  data.changedIdentityPaints = identityPaints and deepcopy(identityPaints) or nil
+  data.identityPaintRecoveryInitialized = true
   applyStolenMarketDiscount(inventoryId)
 
   -- Move from the private identity-locked state into RLS's normal uninsured
@@ -2321,7 +2628,7 @@ local function stripVehicleForParts(inventoryId)
         text = string.format("Permanently strip <strong v-pre>%s</strong> (vehicle #%s) for <strong>$%d</strong>?<br>This removes the entire vehicle from your inventory and cannot be undone.", name, tostring(inventoryId), payout),
         buttons = {
           {label = "Cancel", luaCallback = callback .. "false)", isCancel = true, default = true},
-          {label = "Strip for Parts", luaCallback = callback .. "true)"}
+          {label = "Strip for Parts", luaCallback = callback .. "true)", isConfirm = true, isDestructive = true}
         }
       })
     end)
@@ -2563,6 +2870,7 @@ local function onTeleportedToGarage(garageId, obj)
     -- RLS can retrieve an already-spawned object. Restart the guard after the
     -- native placement callback, even when its vehicle ID has not changed.
     scheduleSafePark(inventoryId, vehId)
+    scheduleLaunderedIdentityRestore(inventoryId, vehId)
   end
 end
 
@@ -2635,6 +2943,44 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   dtReal = tonumber(dtReal) or 0
   dtSim = tonumber(dtSim) or 0
 
+  for inventoryId, pending in pairs(pendingStreetIdentityRestore) do
+    pending.frames = (pending.frames or 1) - 1
+    if pending.frames <= 0 then
+      local vehicle = getInventoryVehicle(inventoryId)
+      local theft = vehicle and vehicle.rlsCarjack
+      if theft and theft.source == "streetTraffic" then
+        local generatedYear = tonumber(theft.streetGeneratedYear)
+        local generatedMileage = tonumber(theft.streetGeneratedMileage)
+        if generatedYear then vehicle.year = generatedYear end
+        if generatedMileage then vehicle.mileage = generatedMileage end
+        requestCareerSave(0.25)
+      end
+      pendingStreetIdentityRestore[inventoryId] = nil
+    end
+  end
+
+  for inventoryId, pending in pairs(pendingLaunderedIdentityRestore) do
+    pending.timer = pending.timer - dtSim
+    if pending.timer <= 0 then
+      if playerInfo ~= nil and playerInfo.anyPlayerSeated and be:getPlayerVehicleID(0) == pending.vehId then
+        -- Entering the car is an explicit recovery handoff. Preserve the live
+        -- paint chosen by the player while still reasserting the identity plate.
+        reassertChangedIdentity(inventoryId, pending.vehId, false)
+        pendingLaunderedIdentityRestore[inventoryId] = nil
+      elseif not getObjectByID(pending.vehId) then
+        pendingLaunderedIdentityRestore[inventoryId] = nil
+      else
+        reassertChangedIdentity(inventoryId, pending.vehId, true)
+        pending.attempts = pending.attempts - 1
+        if pending.attempts <= 0 then
+          pendingLaunderedIdentityRestore[inventoryId] = nil
+        else
+          pending.timer = 0.15
+        end
+      end
+    end
+  end
+
   for inventoryId, request in pairs(pendingStrips) do
     if request.timer then request.timer = request.timer - dtReal end
     if request.timer and request.timer <= 0 then
@@ -2684,6 +3030,7 @@ local function onVehicleDestroyed(vehId)
     if observedVehId == vehId then
       observedSpawnedVehicles[inventoryId] = nil
       pendingSafePark[inventoryId] = nil
+      pendingLaunderedIdentityRestore[inventoryId] = nil
     end
   end
 end
@@ -2698,10 +3045,59 @@ local function onVehicleActiveChanged(vehId, active)
   end
 end
 
+local function onVehiclePartConditionsChanged(inventoryId)
+  inventoryId = tonumber(inventoryId) or inventoryId
+  if not inventoryId then return end
+  local data = getCarjackData(inventoryId)
+  if not data or (data.identityChanged ~= true and data.vinChanged ~= true) then return end
+
+  local vehId = career_modules_inventory.getVehicleIdFromInventoryId
+    and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
+  reassertChangedIdentity(inventoryId, vehId, true)
+end
+
+local function onRepairInGarage(inventoryId)
+  inventoryId = tonumber(inventoryId) or inventoryId
+  if not inventoryId then return end
+  local data = getCarjackData(inventoryId)
+  if not data or (data.identityChanged ~= true and data.vinChanged ~= true) then return end
+  local vehId = career_modules_inventory.getVehicleIdFromInventoryId
+    and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
+  reassertChangedIdentity(inventoryId, vehId, false)
+end
+
+local function onRecoveryPromptRepairHereUsed()
+  local inventoryId = career_modules_inventory.getCurrentVehicle
+    and career_modules_inventory.getCurrentVehicle() or nil
+  local playerId = be:getPlayerVehicleID(0)
+  inventoryId = inventoryId or (playerId and career_modules_inventory.getInventoryIdFromVehicleId
+    and career_modules_inventory.getInventoryIdFromVehicleId(playerId)) or nil
+  if not inventoryId then return end
+
+  local data = getCarjackData(inventoryId)
+  if not data or (data.identityChanged ~= true and data.vinChanged ~= true) then return end
+  local vehId = career_modules_inventory.getVehicleIdFromInventoryId
+    and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
+  if vehId then scheduleLaunderedIdentityRestore(inventoryId, vehId) end
+end
+
 local function onVehicleAdded(inventoryId)
   inventoryId = tonumber(inventoryId) or inventoryId
   if inventoryId and isStolenInventoryVehicle(inventoryId) then
     trackedStolenInventoryIds[inventoryId] = true
+    local vehicle = getInventoryVehicle(inventoryId)
+    local theft = vehicle and vehicle.rlsCarjack
+    if theft and theft.source == "streetTraffic" then
+      local generatedYear = tonumber(theft.streetGeneratedYear)
+      local generatedMileage = tonumber(theft.streetGeneratedMileage)
+      if generatedYear then vehicle.year = generatedYear end
+      if generatedMileage then vehicle.mileage = generatedMileage end
+    end
+    if theft and (theft.identityChanged == true or theft.vinChanged == true) then
+      local spawnedId = career_modules_inventory.getVehicleIdFromInventoryId
+        and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
+      if spawnedId then scheduleLaunderedIdentityRestore(inventoryId, spawnedId) end
+    end
     ensureInventoryBaseValue(inventoryId)
     applyStolenMarketDiscount(inventoryId)
     ensureStolenInsuranceState(inventoryId)
@@ -2715,6 +3111,18 @@ local function onVehicleAdded(inventoryId)
       pendingInventoryPaintSnapshots[inventoryId] = nil
       requestCareerSave(0.25)
     end
+  end
+end
+
+-- RLS 2.7.2 preserves an existing inventory year, but partInventory emits this
+-- hook later than onVehicleAdded. Restore the generated street identity on the
+-- following frame so hook ordering cannot replace it.
+local function onAddedVehiclePartsToInventory(inventoryId, newParts)
+  inventoryId = tonumber(inventoryId) or inventoryId
+  local vehicle = inventoryId and getInventoryVehicle(inventoryId) or nil
+  local theft = vehicle and vehicle.rlsCarjack
+  if theft and theft.source == "streetTraffic" and theft.streetGeneratedYear then
+    pendingStreetIdentityRestore[inventoryId] = {frames = 1}
   end
 end
 
@@ -2734,13 +3142,40 @@ local function cleanupSpawnedPoliceResponders()
   end
 end
 
+local function ensureFullDetailTrafficVehicles()
+  if not cfg.requireFullDetailTrafficVehicles then return false end
+  if not settings or not settings.getValue or not settings.setValue then return false end
+
+  local ok, simpleTraffic = pcall(function() return settings.getValue("trafficSimpleVehicles") end)
+  if not ok or simpleTraffic ~= true then return false end
+
+  local okSet = pcall(function() settings.setValue("trafficSimpleVehicles", false) end)
+  if not okSet then return false end
+  originalTrafficSimpleVehicles = true
+  trafficSimpleVehiclesChanged = true
+  log("I", logTag, "Disabled simplified traffic while carjacking is active so stolen vehicles use full career vehicle configs.")
+  return true
+end
+
+local function restoreFullDetailTrafficVehicleSetting()
+  if not trafficSimpleVehiclesChanged or originalTrafficSimpleVehicles ~= true then return false end
+  if settings and settings.setValue then
+    pcall(function() settings.setValue("trafficSimpleVehicles", true) end)
+  end
+  originalTrafficSimpleVehicles = nil
+  trafficSimpleVehiclesChanged = false
+  return true
+end
+
 local function onExtensionLoaded()
+  ensureFullDetailTrafficVehicles()
   installWalkingModeWrapper()
   installSpeedTrapExemption()
   enforceStolenVehicleState()
 end
 
 local function onCareerModulesActivated(alreadyInLevel)
+  ensureFullDetailTrafficVehicles()
   installWalkingModeWrapper()
   installSpeedTrapExemption()
   enforceStolenVehicleState()
@@ -2756,6 +3191,9 @@ local function onExtensionUnloaded()
   observedSpawnedVehicles = {}
   pendingSafePark = {}
   pendingStrips = {}
+  pendingStreetIdentityRestore = {}
+  pendingLaunderedIdentityRestore = {}
+  restoreFullDetailTrafficVehicleSetting()
   cleanupSpawnedPoliceResponders()
   restoreSpeedTrapExemption()
   restoreWalkingModeWrapper()
@@ -2772,6 +3210,10 @@ M.getConfig = function() return cfg end
 M.onVehicleDestroyed = onVehicleDestroyed
 M.onVehicleActiveChanged = onVehicleActiveChanged
 M.onVehicleAdded = onVehicleAdded
+M.onAddedVehiclePartsToInventory = onAddedVehiclePartsToInventory
+M.onVehiclePartConditionsChanged = onVehiclePartConditionsChanged
+M.onRepairInGarage = onRepairInGarage
+M.onRecoveryPromptRepairHereUsed = onRecoveryPromptRepairHereUsed
 M.onTeleportedToGarage = onTeleportedToGarage
 M.onComputerAddFunctions = onComputerAddFunctions
 M.onBeforeRadialOpened = onBeforeRadialOpened
