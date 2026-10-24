@@ -130,7 +130,7 @@ local pending = upvalue(s.mod.stripVehicleForParts, "pendingStrips")
 for i = 1, 100 do
   local name, value = debug.getupvalue(s.mod.onUpdate, i)
   if not name then break end
-  if type(value) == "function" and name ~= "message" then
+  if type(value) == "function" and name ~= "message" and name ~= "refreshRlsModules" then
     debug.setupvalue(s.mod.onUpdate, i, function() end)
   end
 end
@@ -235,7 +235,7 @@ gameplay_walk = {
   getVehicleInFront = function() return nil end,
 }
 s.mod.onExtensionLoaded()
-local installWalkingMode = upvalue(s.mod.onExtensionLoaded, "installWalkingModeWrapper")
+local installWalkingMode = upvalue(s.mod.onUpdate, "installWalkingModeWrapper")
 local walkingWrapper = upvalue(installWalkingMode, "wrappedToggleWalkingMode")
 local findTarget = upvalue(walkingWrapper, "findJackTarget")
 local isJackableTraffic = upvalue(findTarget, "isJackableTrafficVehicle")
@@ -262,7 +262,7 @@ settings = {
     settings.value = value
   end,
 }
-local ensureFullDetail = upvalue(s.mod.onExtensionLoaded, "ensureFullDetailTrafficVehicles")
+local ensureFullDetail = upvalue(s.mod.onUpdate, "ensureFullDetailTrafficVehicles")
 local restoreFullDetail = upvalue(s.mod.onExtensionUnloaded, "restoreFullDetailTrafficVehicleSetting")
 assert(ensureFullDetail() and settings.value == false)
 assert(restoreFullDetail() and settings.value == true)
@@ -349,4 +349,61 @@ for i = 1, 100 do
 end
 assert(finalize(7, 100))
 assert(vehicle.rlsCarjack.identityChanged and vehicle.meetReputation == 10, "restore value immediately on completion")
+
+-- RLS 2.8 moved career modules to the overhaul_* namespace. Prefer those over
+-- any stock/legacy globals and join RLS's walking patch chain.
+career_career = {isActive = function() return false end}
+career_modules_inventory = {
+  getVehicles = function() return {[7] = {rlsCarjack = {stolen = false}}} end,
+}
+overhaul_career_career = {isActive = function() return true end}
+overhaul_career_saveSystem = {}
+overhaul_career_garage_inventory = {
+  getVehicles = function() return {[7] = {rlsCarjack = {stolen = true}}} end,
+}
+overhaul_career_repair_insurance = {}
+overhaul_career_market_valueCalculator = {}
+overhaul_career_market_inspectVehicle = {}
+overhaul_career_market_vehicleShopping = {}
+overhaul_career_market_testDrive = {}
+overhaul_career_economy_playerAttributes = {}
+overhaul_career_progression_reputation = {}
+overhaul_career_economy_payment = {}
+overhaul_career_police_speedTraps = {}
+overhaul_integration_services_police = {}
+local overhaulMod = dofile(sourcePath)
+career_modules_carjacking = overhaulMod
+assert(overhaulMod.isStolenInventoryVehicle(7), "RLS 2.8 inventory namespace must take precedence")
+assert(type(overhaulMod.onOverhaulVehicleAdded) == "function")
+assert(type(overhaulMod.onOverhaulAddedVehiclePartsToInventory) == "function")
+assert(type(overhaulMod.onOverhaulVehiclePartConditionsChanged) == "function")
+assert(type(overhaulMod.onOverhaulRepairInGarage) == "function")
+assert(type(overhaulMod.onOverhaulComputerAddFunctions) == "function")
+assert(type(overhaulMod.onOverhaulModulesActivated) == "function")
+
+local patchRegistered, patchUnregistered
+overhaul_shell_patches = {
+  registerFields = function(id, _, wrappers)
+    assert(id == "rlsCarjackingWalkingEntry")
+    assert(type(wrappers.toggleWalkingMode) == "function")
+    patchRegistered = true
+    return true
+  end,
+  unregister = function(id)
+    assert(id == "rlsCarjackingWalkingEntry")
+    patchUnregistered = true
+    return true
+  end,
+}
+local originalToggle = function() end
+gameplay_walk = {
+  toggleWalkingMode = originalToggle,
+  isWalking = function() return true end,
+}
+local installOverhaulWalking = upvalue(overhaulMod.onUpdate, "installWalkingModeWrapper")
+assert(installOverhaulWalking() and patchRegistered)
+assert(gameplay_walk.toggleWalkingMode == originalToggle, "must not overwrite RLS's walking patch chain")
+overhaulMod.onOverhaulActive(false)
+assert(patchUnregistered)
+
 print("PASS: strip confirmation/transactions, identity valuation/migration, parking, traffic")

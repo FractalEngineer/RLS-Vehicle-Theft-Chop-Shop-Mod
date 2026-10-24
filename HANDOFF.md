@@ -2,9 +2,16 @@
 
 ## Status
 
-**Current working build: v0.3.1, targeting BeamNG.drive 0.40.3 and RLS 2.7.2. Runtime testing failed on 2026-10-23.**
+**Current working build: v0.3.1, targeting BeamNG.drive 0.40.3 and RLS Career Overhaul 2.8.0. Runtime testing is pending.**
 
-**Blocked pending:** an RLS Career Overhaul update compatible with BeamNG.drive 0.40. Do not publish or tag v0.3.1 until that RLS update is installed and the full runtime matrix passes.
+**Pending:** validate the RLS 2.8.0 namespace migration in BeamNG. Do not publish or tag v0.3.1 until the full runtime matrix passes.
+
+RLS 2.8.0 compatibility work:
+- Confirmed the old build never loaded because `career_modules_inventory` was replaced by `overhaul_career_garage_inventory`; `career_career` and `career_saveSystem` also have `overhaul_*` equivalents.
+- Removed the renamed RLS modules from static dependencies and added runtime resolution that prefers the 2.8 namespace with a 2.7 fallback.
+- Mapped police, insurance, valuation, inspection, shopping, test-drive, payment, reputation, player-attribute and speed-trap modules to their 2.8 namespaces.
+- Added `onOverhaul*` inventory, part-condition, repair, computer-menu, activation and active-state hook aliases.
+- Joined `overhaul_shell_patches` for the Enter/Exit wrapper so RLS 2.8 realistic walking entry remains in the wrapper chain.
 
 v0.3.1 issue-tracker work:
 - Re-audited installed RLS 2.7.2 after the latest user update.

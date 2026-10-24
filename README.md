@@ -2,11 +2,11 @@
 
 Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 
-Version **0.3.1**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul 2.7.2**.
+Version **0.3.1**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul 2.8.0**.
 
-> **Compatibility status:** runtime testing on BeamNG.drive 0.40.3 with RLS 2.7.2
-> failed on 2026-10-23. This source remains unpublished and is waiting for an RLS
-> update compatible with BeamNG.drive 0.40 before further runtime validation.
+> **Compatibility status:** adapted to the RLS 2.8.0 `overhaul_*` module and
+> lifecycle namespace. This source remains unpublished pending runtime testing
+> on BeamNG.drive 0.40.3 with RLS 2.8.0.
 
 ## Features
 

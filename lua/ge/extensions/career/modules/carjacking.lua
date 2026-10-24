@@ -5,16 +5,52 @@
 local M = {}
 
 -- Keep hard dependencies to the minimum needed for the core interaction.
--- Police, insurance and valuation modules are accessed defensively at runtime.
+-- RLS 2.8 renamed its career modules to the overhaul_* namespace; resolve those
+-- after load so this extension can start before the career session exists.
 M.dependencies = {
-  "career_career",
-  "career_saveSystem",
-  "career_modules_inventory",
   "gameplay_walk",
   "gameplay_traffic"
 }
 
 local logTag = "rlsCarjacking"
+
+-- These locals shadow the legacy global names used throughout the module. Each
+-- refresh prefers the current RLS namespace but keeps the 2.7 names working.
+local career_career
+local career_saveSystem
+local career_modules_inventory
+local career_modules_insurance_insurance
+local career_modules_valueCalculator
+local career_modules_inspectVehicle
+local career_modules_vehicleShopping
+local career_modules_testDrive
+local career_modules_playerAttributes
+local career_modules_reputation
+local career_modules_payment
+local career_modules_speedTraps
+local gameplay_police_module
+local rlsIntegrationInitialized = false
+
+local function resolveRlsModule(currentName, legacyName)
+  return rawget(_G, currentName) or rawget(_G, legacyName)
+end
+
+local function refreshRlsModules()
+  career_career = resolveRlsModule("overhaul_career_career", "career_career")
+  career_saveSystem = resolveRlsModule("overhaul_career_saveSystem", "career_saveSystem")
+  career_modules_inventory = resolveRlsModule("overhaul_career_garage_inventory", "career_modules_inventory")
+  career_modules_insurance_insurance = resolveRlsModule("overhaul_career_repair_insurance", "career_modules_insurance_insurance")
+  career_modules_valueCalculator = resolveRlsModule("overhaul_career_market_valueCalculator", "career_modules_valueCalculator")
+  career_modules_inspectVehicle = resolveRlsModule("overhaul_career_market_inspectVehicle", "career_modules_inspectVehicle")
+  career_modules_vehicleShopping = resolveRlsModule("overhaul_career_market_vehicleShopping", "career_modules_vehicleShopping")
+  career_modules_testDrive = resolveRlsModule("overhaul_career_market_testDrive", "career_modules_testDrive")
+  career_modules_playerAttributes = resolveRlsModule("overhaul_career_economy_playerAttributes", "career_modules_playerAttributes")
+  career_modules_reputation = resolveRlsModule("overhaul_career_progression_reputation", "career_modules_reputation")
+  career_modules_payment = resolveRlsModule("overhaul_career_economy_payment", "career_modules_payment")
+  career_modules_speedTraps = resolveRlsModule("overhaul_career_police_speedTraps", "career_modules_speedTraps")
+  gameplay_police_module = resolveRlsModule("overhaul_integration_services_police", "gameplay_police")
+  return career_career ~= nil and career_modules_inventory ~= nil
+end
 
 local cfg = {
   interactDistance = 3.25,
@@ -76,6 +112,11 @@ local cfg = {
 -- existing BeamNG Enter/Exit Vehicle action can also enter unowned AI traffic.
 local originalToggleWalkingMode
 local wrappedToggleWalkingMode
+local walkingModePatchRegistered = false
+local walkingModeDirectInstalled = false
+local walkingModePatchId = "rlsCarjackingWalkingEntry"
+local restoreWalkingModeWrapper
+local ensureFullDetailTrafficVehicles
 
 -- Narrow wrappers for RLS camera enforcement. These only bypass automated
 -- camera fines while the player is driving a stolen inventory vehicle.
@@ -148,39 +189,47 @@ local function nowPersistentTime()
 end
 
 local function getPoliceModule()
-  return rawget(_G, "gameplay_police")
+  return gameplay_police_module or resolveRlsModule("overhaul_integration_services_police", "gameplay_police")
 end
 
 local function getInsuranceModule()
-  return rawget(_G, "career_modules_insurance_insurance")
+  return career_modules_insurance_insurance or resolveRlsModule("overhaul_career_repair_insurance", "career_modules_insurance_insurance")
 end
 
 local function getValueCalculator()
-  return rawget(_G, "career_modules_valueCalculator")
+  return career_modules_valueCalculator or resolveRlsModule("overhaul_career_market_valueCalculator", "career_modules_valueCalculator")
 end
 
 local function getInspectVehicleModule()
-  return rawget(_G, "career_modules_inspectVehicle")
+  return career_modules_inspectVehicle or resolveRlsModule("overhaul_career_market_inspectVehicle", "career_modules_inspectVehicle")
 end
 
 local function getVehicleShoppingModule()
-  return rawget(_G, "career_modules_vehicleShopping")
+  return career_modules_vehicleShopping or resolveRlsModule("overhaul_career_market_vehicleShopping", "career_modules_vehicleShopping")
 end
 
 local function getTestDriveModule()
-  return rawget(_G, "career_modules_testDrive")
+  return career_modules_testDrive or resolveRlsModule("overhaul_career_market_testDrive", "career_modules_testDrive")
 end
 
 local function getPlayerAttributesModule()
-  return rawget(_G, "career_modules_playerAttributes")
+  return career_modules_playerAttributes or resolveRlsModule("overhaul_career_economy_playerAttributes", "career_modules_playerAttributes")
 end
 
 local function getReputationModule()
-  return rawget(_G, "career_modules_reputation")
+  return career_modules_reputation or resolveRlsModule("overhaul_career_progression_reputation", "career_modules_reputation")
 end
 
 local function getPaymentModule()
-  return rawget(_G, "career_modules_payment")
+  return career_modules_payment or resolveRlsModule("overhaul_career_economy_payment", "career_modules_payment")
+end
+
+local function getFacilitiesModule()
+  return resolveRlsModule("overhaul_world_facilities", "freeroam_facilities")
+end
+
+local function getOrganizationsModule()
+  return resolveRlsModule("overhaul_world_organizations", "freeroam_organizations")
 end
 
 local function getVehicleRoleName(trafficData)
@@ -1625,8 +1674,8 @@ local function applyDealerHotwireReputationPenalty(vehicleInfo)
   local penalty = math.max(0, tonumber(cfg.dealerHotwireReputationPenalty) or 0)
   if penalty <= 0 or type(vehicleInfo) ~= "table" or vehicleInfo.sellerId == "private" then return nil end
 
-  local facilities = rawget(_G, "freeroam_facilities")
-  local organizations = rawget(_G, "freeroam_organizations")
+  local facilities = getFacilitiesModule()
+  local organizations = getOrganizationsModule()
   local playerAttributes = getPlayerAttributesModule()
   if not facilities or not facilities.getDealership or not playerAttributes or not playerAttributes.addAttributes then
     return nil
@@ -1910,44 +1959,76 @@ local function onQuickAccessLoaded()
 end
 
 local function installWalkingModeWrapper()
-  if originalToggleWalkingMode then return true end
+  if walkingModePatchRegistered then return true end
   if not gameplay_walk or type(gameplay_walk.toggleWalkingMode) ~= "function" then return false end
 
-  originalToggleWalkingMode = gameplay_walk.toggleWalkingMode
-  wrappedToggleWalkingMode = function(...)
-    -- Never interfere outside career, or when the player is currently in a car.
-    if not isCareerActive() or not gameplay_walk.isWalking or not gameplay_walk.isWalking() then
-      return originalToggleWalkingMode(...)
-    end
+  local function makeWrapper(original)
+    originalToggleWalkingMode = original
+    wrappedToggleWalkingMode = function(...)
+      -- Never interfere outside career, or when the player is currently in a car.
+      if not isCareerActive() or not gameplay_walk.isWalking or not gameplay_walk.isWalking() then
+        return original(...)
+      end
 
-    -- BeamNG's own walking system has already resolved legitimate enterable
-    -- vehicles into vehicleInFront. Never override that decision. This is the
-    -- important compatibility boundary for RLS taxis and any other service or
-    -- scripted vehicle intended to be entered normally.
-    local normalTarget = gameplay_walk.getVehicleInFront and gameplay_walk.getVehicleInFront() or nil
-    if normalTarget then
-      return originalToggleWalkingMode(...)
-    end
+      -- BeamNG's own walking system has already resolved legitimate enterable
+      -- vehicles into vehicleInFront. Never override that decision. This is the
+      -- important compatibility boundary for RLS taxis and any other service or
+      -- scripted vehicle intended to be entered normally.
+      local normalTarget = gameplay_walk.getVehicleInFront and gameplay_walk.getVehicleInFront() or nil
+      if normalTarget then
+        return original(...)
+      end
 
-    -- Only when vanilla has no enterable target do we look for native AI traffic.
-    -- Those vehicles are normally blacklisted from gameplay_walk, which is why a
-    -- separate nearby fallback is needed for carjacking at all.
-    local targetId, _, isPolice = findJackTarget(false)
-    if targetId then
-      return completeCarjack(targetId, isPolice)
-    end
+      -- Only when vanilla has no enterable target do we look for native AI traffic.
+      -- Those vehicles are normally blacklisted from gameplay_walk, which is why a
+      -- separate nearby fallback is needed for carjacking at all.
+      local targetId, _, isPolice = findJackTarget(false)
+      if targetId then
+        return completeCarjack(targetId, isPolice)
+      end
 
-    return originalToggleWalkingMode(...)
+      return original(...)
+    end
+    return wrappedToggleWalkingMode
   end
 
+  -- RLS 2.8 owns realistic walking entry through its patch host. Join that
+  -- wrapper chain instead of replacing it with a direct gameplay_walk override.
+  local patchHost = rawget(_G, "overhaul_shell_patches")
+  if patchHost and type(patchHost.registerFields) == "function" then
+    restoreWalkingModeWrapper()
+    local ok = pcall(patchHost.registerFields, walkingModePatchId,
+      function() return rawget(_G, "gameplay_walk") end,
+      {
+        toggleWalkingMode = function(original)
+          if type(original) ~= "function" then return nil end
+          return makeWrapper(original)
+        end
+      })
+    walkingModePatchRegistered = ok
+    return ok
+  end
+  if walkingModeDirectInstalled then return true end
+
+  originalToggleWalkingMode = gameplay_walk.toggleWalkingMode
+  makeWrapper(originalToggleWalkingMode)
   gameplay_walk.toggleWalkingMode = wrappedToggleWalkingMode
+  walkingModeDirectInstalled = true
   return true
 end
 
-local function restoreWalkingModeWrapper()
+restoreWalkingModeWrapper = function()
+  if walkingModePatchRegistered then
+    local patchHost = rawget(_G, "overhaul_shell_patches")
+    if patchHost and type(patchHost.unregister) == "function" then
+      pcall(patchHost.unregister, walkingModePatchId)
+    end
+    walkingModePatchRegistered = false
+  end
   if gameplay_walk and wrappedToggleWalkingMode and originalToggleWalkingMode and gameplay_walk.toggleWalkingMode == wrappedToggleWalkingMode then
     gameplay_walk.toggleWalkingMode = originalToggleWalkingMode
   end
+  walkingModeDirectInstalled = false
   originalToggleWalkingMode = nil
   wrappedToggleWalkingMode = nil
 end
@@ -2739,7 +2820,8 @@ local function callSpeedTrapWithoutOwnershipFine(handler, speedTrapData, ...)
 end
 
 local function installSpeedTrapExemption()
-  local speedTraps = rawget(_G, "career_modules_speedTraps")
+  local speedTraps = career_modules_speedTraps
+    or resolveRlsModule("overhaul_career_police_speedTraps", "career_modules_speedTraps")
   if not speedTraps then return false end
 
   if not originalSpeedTrapHandler and type(speedTraps.onSpeedTrapTriggered) == "function" then
@@ -2770,7 +2852,8 @@ local function installSpeedTrapExemption()
 end
 
 local function restoreSpeedTrapExemption()
-  local speedTraps = rawget(_G, "career_modules_speedTraps")
+  local speedTraps = career_modules_speedTraps
+    or resolveRlsModule("overhaul_career_police_speedTraps", "career_modules_speedTraps")
   if speedTraps then
     if originalSpeedTrapHandler and speedTraps.onSpeedTrapTriggered == wrappedSpeedTrapHandler then
       speedTraps.onSpeedTrapTriggered = originalSpeedTrapHandler
@@ -2942,6 +3025,18 @@ end
 local function onUpdate(dtReal, dtSim, dtRaw)
   dtReal = tonumber(dtReal) or 0
   dtSim = tonumber(dtSim) or 0
+
+  if not refreshRlsModules() then
+    rlsIntegrationInitialized = false
+    return
+  end
+  if not rlsIntegrationInitialized then
+    ensureFullDetailTrafficVehicles()
+    enforceStolenVehicleState()
+    rlsIntegrationInitialized = true
+  end
+  installWalkingModeWrapper()
+  installSpeedTrapExemption()
 
   for inventoryId, pending in pairs(pendingStreetIdentityRestore) do
     pending.frames = (pending.frames or 1) - 1
@@ -3142,7 +3237,7 @@ local function cleanupSpawnedPoliceResponders()
   end
 end
 
-local function ensureFullDetailTrafficVehicles()
+ensureFullDetailTrafficVehicles = function()
   if not cfg.requireFullDetailTrafficVehicles then return false end
   if not settings or not settings.getValue or not settings.setValue then return false end
 
@@ -3168,20 +3263,27 @@ local function restoreFullDetailTrafficVehicleSetting()
 end
 
 local function onExtensionLoaded()
-  ensureFullDetailTrafficVehicles()
-  installWalkingModeWrapper()
-  installSpeedTrapExemption()
-  enforceStolenVehicleState()
+  if not refreshRlsModules() then return end
+  onUpdate(0, 0, 0)
 end
 
 local function onCareerModulesActivated(alreadyInLevel)
-  ensureFullDetailTrafficVehicles()
-  installWalkingModeWrapper()
-  installSpeedTrapExemption()
-  enforceStolenVehicleState()
+  if not refreshRlsModules() then return end
+  onUpdate(0, 0, 0)
+end
+
+local function onOverhaulActive(active)
+  if active == false then
+    restoreFullDetailTrafficVehicleSetting()
+    restoreWalkingModeWrapper()
+    rlsIntegrationInitialized = false
+    return
+  end
+  onCareerModulesActivated(true)
 end
 
 local function onExtensionUnloaded()
+  rlsIntegrationInitialized = false
   pendingHotwire = nil
   pendingHotwireRelease = {}
   quickAccessInitialized = false
@@ -3221,6 +3323,16 @@ M.onQuickAccessLoaded = onQuickAccessLoaded
 M.onUpdate = onUpdate
 M.onExtensionLoaded = onExtensionLoaded
 M.onCareerModulesActivated = onCareerModulesActivated
+M.onCareerActivated = onCareerModulesActivated
+M.onOverhaulModulesActivated = onCareerModulesActivated
+M.onOverhaulActive = onOverhaulActive
+M.onOverhaulVehicleAdded = onVehicleAdded
+M.onOverhaulAddedVehiclePartsToInventory = onAddedVehiclePartsToInventory
+M.onOverhaulVehiclePartConditionsChanged = onVehiclePartConditionsChanged
+M.onOverhaulRepairInGarage = onRepairInGarage
+M.onOverhaulComputerAddFunctions = onComputerAddFunctions
 M.onExtensionUnloaded = onExtensionUnloaded
+
+refreshRlsModules()
 
 return M
