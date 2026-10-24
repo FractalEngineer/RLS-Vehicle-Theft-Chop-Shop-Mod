@@ -23,6 +23,7 @@ README.md
 lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
+scripts/rls_carjacking/modScript.lua
 ui/modModules/rlsCarjacking/rlsCarjacking.js
 ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```
@@ -358,6 +359,7 @@ Before packaging:
    lua/ge/extensions/career/modules/carjacking.lua
    mod_info/M3Z1BLS58/icon.jpg
    mod_info/M3Z1BLS58/info.json
+   scripts/rls_carjacking/modScript.lua
    ui/modModules/rlsCarjacking/rlsCarjacking.js
    ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
    ```

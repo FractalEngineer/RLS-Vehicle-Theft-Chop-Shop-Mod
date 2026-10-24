@@ -8,6 +8,7 @@
 
 RLS 2.8.0 compatibility work:
 - Confirmed the old build never loaded because `career_modules_inventory` was replaced by `overhaul_career_garage_inventory`; `career_career` and `career_saveSystem` also have `overhaul_*` equivalents.
+- Confirmed RLS 2.8 stopped auto-discovering the add-on at `career/modules`; added an explicit deferred `modScript.lua` loader.
 - Removed the renamed RLS modules from static dependencies and added runtime resolution that prefers the 2.8 namespace with a 2.7 fallback.
 - Mapped police, insurance, valuation, inspection, shopping, test-drive, payment, reputation, player-attribute and speed-trap modules to their 2.8 namespaces.
 - Added `onOverhaul*` inventory, part-condition, repair, computer-menu, activation and active-state hook aliases.
@@ -73,6 +74,7 @@ README.md
 lua/ge/extensions/career/modules/carjacking.lua
 mod_info/M3Z1BLS58/icon.jpg
 mod_info/M3Z1BLS58/info.json
+scripts/rls_carjacking/modScript.lua
 ui/modModules/rlsCarjacking/rlsCarjacking.js
 ui/modModules/rlsCarjacking/icons/strip_for_parts.svg
 ```

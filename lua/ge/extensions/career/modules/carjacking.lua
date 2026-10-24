@@ -4,13 +4,9 @@
 
 local M = {}
 
--- Keep hard dependencies to the minimum needed for the core interaction.
--- RLS 2.8 renamed its career modules to the overhaul_* namespace; resolve those
--- after load so this extension can start before the career session exists.
-M.dependencies = {
-  "gameplay_walk",
-  "gameplay_traffic"
-}
+-- RLS 2.8 renamed its career modules to the overhaul_* namespace. This
+-- extension is loaded explicitly by its mod script and resolves every module
+-- at runtime, so load order cannot block carjacking from starting.
 
 local logTag = "rlsCarjacking"
 

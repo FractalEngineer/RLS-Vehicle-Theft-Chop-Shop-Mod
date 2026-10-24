@@ -27,6 +27,7 @@ FILES = [
     "lua/ge/extensions/career/modules/carjacking.lua",
     "mod_info/M3Z1BLS58/icon.jpg",
     "mod_info/M3Z1BLS58/info.json",
+    "scripts/rls_carjacking/modScript.lua",
     "ui/modModules/rlsCarjacking/rlsCarjacking.js",
     "ui/modModules/rlsCarjacking/icons/strip_for_parts.svg",
 ]
@@ -45,7 +46,12 @@ for name in FILES[-1:]:
     assert ET.parse(name).getroot().tag == "{http://www.w3.org/2000/svg}svg"
 assert f"-- Version {version}." in Path(FILES[1]).read_text(encoding="utf-8")
 runtime = LuaRuntime()
-runtime.execute("local f,e = loadfile(...) assert(f,e)", FILES[1])
+for name in FILES:
+    if name.endswith(".lua"):
+        runtime.execute("local f,e = loadfile(...) assert(f,e)", name)
+calling_script = Path(FILES[4]).read_text(encoding="utf-8")
+assert 'local extensionName = "career_modules_carjacking"' in calling_script
+assert "extensions.load(extensionName)" in calling_script
 runtime.execute("assert(loadfile(...))()", "tests/test_carjacking.lua")
 print(f"PASS: {runtime.lua_implementation} loadfile, metadata, RGB icon, SVGs, manifest")
 if args.package:
