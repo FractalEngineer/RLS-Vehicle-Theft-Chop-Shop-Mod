@@ -1431,8 +1431,8 @@ local function waitForReserveAndBegin(pending, policeId)
 
   core_jobsystem.create(function(job)
     local trafficVehicle
-    for _ = 1, 30 do
-      job.yield()
+    for _ = 1, 50 do
+      job.sleep(0.1)
       if not pendingReserveStillValid(pending) then
         clearPendingPoliceReserve(pending)
         return
@@ -1444,7 +1444,7 @@ local function waitForReserveAndBegin(pending, policeId)
       end
     end
     if trafficVehicle and trafficVehicle.state == "active" then
-      job.yield()
+      job.sleep(0.2)
       finishPendingReservePursuit(pending, policeId)
     else
       log("W", logTag, string.format("Native police reserve %s did not activate", tostring(policeId)))
