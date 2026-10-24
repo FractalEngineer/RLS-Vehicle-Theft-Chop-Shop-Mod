@@ -1418,7 +1418,12 @@ local function ensurePoliceResponderCount(targetId, desired)
   -- a whole convoy of replacements before the first unit appears in policeVehs.
   -- Wake RLS's existing pool first, and create at most one marked fallback.
   local responders = wakePoliceResponders(targetId)
-  if #responders < desired and countAvailablePoliceResponders(targetId) < desired then
+  -- RLS 2.8 owns police spawning and pooling through its integration service.
+  -- Directly inserting a replacement outside that service can recurse through
+  -- the new traffic lifecycle. Maximum heat still starts with zero responders,
+  -- and RLS can fill the pursuit from its own pool.
+  local usesNativePoliceTraffic = rawget(_G, "overhaul_integration_services_police") ~= nil
+  if not usesNativePoliceTraffic and #responders < desired and countAvailablePoliceResponders(targetId) < desired then
     spawnPoliceResponder(targetId)
     responders = wakePoliceResponders(targetId)
   end

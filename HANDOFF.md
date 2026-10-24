@@ -13,6 +13,7 @@ RLS 2.8.0 compatibility work:
 - Mapped police, insurance, valuation, inspection, shopping, test-drive, payment, reputation, player-attribute and speed-trap modules to their 2.8 namespaces.
 - Added `onOverhaul*` inventory, part-condition, repair, computer-menu, activation and active-state hook aliases.
 - Joined `overhaul_shell_patches` for the Enter/Exit wrapper so RLS 2.8 realistic walking entry remains in the wrapper chain.
+- Disabled the legacy direct police-responder spawn under RLS 2.8. The old manual `spawnNewVehicle`/`insertTraffic` path triggered a stack overflow after police-car theft; RLS now owns police spawning and pursuit population.
 
 v0.3.1 issue-tracker work:
 - Re-audited installed RLS 2.7.2 after the latest user update.

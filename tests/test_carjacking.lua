@@ -406,4 +406,25 @@ assert(gameplay_walk.toggleWalkingMode == originalToggle, "must not overwrite RL
 overhaulMod.onOverhaulActive(false)
 assert(patchUnregistered)
 
+-- RLS 2.8 owns police spawning. The legacy manual fallback must stay disabled
+-- even when no existing responder is visible yet.
+local processAlert = upvalue(overhaulMod.onUpdate, "processImmediateAlert")
+local ensureResponderCount = upvalue(processAlert, "ensurePoliceResponderCount")
+local wakeResponders = upvalue(ensureResponderCount, "wakePoliceResponders")
+local availableResponders = upvalue(ensureResponderCount, "countAvailablePoliceResponders")
+local spawnResponder = upvalue(ensureResponderCount, "spawnPoliceResponder")
+local spawnedFallback = false
+wakeResponders = function() return {} end
+availableResponders = function() return 0 end
+spawnResponder = function() spawnedFallback = true end
+for i = 1, 100 do
+  local name = debug.getupvalue(ensureResponderCount, i)
+  if not name then break end
+  if name == "wakePoliceResponders" then debug.setupvalue(ensureResponderCount, i, wakeResponders) end
+  if name == "countAvailablePoliceResponders" then debug.setupvalue(ensureResponderCount, i, availableResponders) end
+  if name == "spawnPoliceResponder" then debug.setupvalue(ensureResponderCount, i, spawnResponder) end
+end
+assert(#ensureResponderCount(1, 1) == 0 and not spawnedFallback,
+  "RLS 2.8 must not use the legacy manual police spawn path")
+
 print("PASS: strip confirmation/transactions, identity valuation/migration, parking, traffic")
