@@ -1350,15 +1350,15 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
   if not police or not vehId or type(responders) ~= "table" or #responders == 0 then return false end
   pursuitLevel = tonumber(pursuitLevel) or cfg.policeCarjackLevel
 
-  -- RLS 2.8 expects external integrations to seed the suspect and police roles
-  -- through setupPursuitGameplay. The suspect role then starts the pursuit from
-  -- its native traffic tick. Calling setPursuitMode directly from another
-  -- extension's update callback re-enters the police hook chain.
+  -- Seed both roles first, but suppress the suspect role's deferred auto-start.
+  -- RLS's supported integration pattern then starts the selected level in the
+  -- same settled handoff. Letting the deferred auto-start run can re-enter the
+  -- police lifecycle while the newly claimed responder is still settling.
   if type(police.setupPursuitGameplay) == "function" then
     local ok, started = pcall(police.setupPursuitGameplay, vehId, responders, {
       playerId = vehId,
       pursuitMode = pursuitLevel,
-      preventAutoStart = false
+      preventAutoStart = true
     })
     if not ok then
       log("W", logTag, string.format("%s: native pursuit setup failed (%s)", label, tostring(started)))
@@ -1373,15 +1373,21 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
       return false
     end
 
-    -- Native RLS escalation watches pursuit.score. Seed the selected heat level
-    -- so RLS starts and escalates the pursuit itself; never invoke a non-zero
-    -- setPursuitMode from this extension's update callback.
-    local pursuit = targetTraffic.pursuit
-    local vars = police.getPursuitVars and police.getPursuitVars() or nil
-    local scoreLevels = vars and vars.scoreLevels or nil
-    local seedScore = scoreLevels and tonumber(scoreLevels[pursuitLevel])
-    if pursuit and seedScore then
-      pursuit.score = math.max(tonumber(pursuit.score) or 0, seedScore)
+    if type(police.setPursuitMode) ~= "function" then
+      log("W", logTag, string.format("%s: native pursuit start API is unavailable", label))
+      return false
+    end
+    local startOk, startErr = pcall(police.setPursuitMode, pursuitLevel, vehId, responders)
+    if not startOk then
+      log("W", logTag, string.format("%s: native pursuit start failed (%s)", label, tostring(startErr)))
+      return false
+    end
+
+    targetTraffic = (gameplay_traffic.getTrafficData() or {})[vehId]
+    local mode = targetTraffic and targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
+    if mode < 1 then
+      log("W", logTag, string.format("%s: native pursuit did not start (mode=%d)", label, mode))
+      return false
     end
     return true
   end
@@ -1423,34 +1429,8 @@ local function finishPendingReservePursuit(pending, policeId)
 end
 
 local function waitForReserveAndBegin(pending, policeId)
-  if type(core_jobsystem) ~= "table" or type(core_jobsystem.create) ~= "function" then
-    pending.reserveId = policeId
-    pending.settleTimer = 0.75
-    return
-  end
-
-  core_jobsystem.create(function(job)
-    local trafficVehicle
-    for _ = 1, 50 do
-      job.sleep(0.1)
-      if not pendingReserveStillValid(pending) then
-        clearPendingPoliceReserve(pending)
-        return
-      end
-      trafficVehicle = gameplay_traffic.getTrafficData()[policeId]
-      local obj = getObjectByID(policeId)
-      if trafficVehicle and trafficVehicle.state == "active" and obj and obj:getActive() then
-        break
-      end
-    end
-    if trafficVehicle and trafficVehicle.state == "active" then
-      job.sleep(0.2)
-      finishPendingReservePursuit(pending, policeId)
-    else
-      log("W", logTag, string.format("Native police reserve %s did not activate", tostring(policeId)))
-      clearPendingPoliceReserve(pending)
-    end
-  end)
+  pending.reserveId = policeId
+  pending.settleTimer = 0.75
 end
 
 local function claimPendingPoliceReserve(pending)
@@ -1475,6 +1455,27 @@ local function onTrafficReservedVehiclesReady(providerName)
   if providerName ~= "police" then return end
   local pending = pendingPoliceReserve
   if pending then claimPendingPoliceReserve(pending) end
+end
+
+local function processPendingPoliceReserve(dtReal)
+  local pending = pendingPoliceReserve
+  if not pending or not pending.reserveId then return end
+  if not pendingReserveStillValid(pending) then
+    clearPendingPoliceReserve(pending)
+    return
+  end
+
+  pending.settleTimer = (tonumber(pending.settleTimer) or 0.75) - dtReal
+  if pending.settleTimer > 0 then return end
+
+  local traffic = gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
+  local reserveTraffic = traffic[pending.reserveId]
+  local reserveObj = getObjectByID(pending.reserveId)
+  if reserveTraffic and reserveTraffic.state == "active" and reserveObj and reserveObj:getActive() then
+    finishPendingReservePursuit(pending, pending.reserveId)
+  else
+    pending.settleTimer = 0.25
+  end
 end
 
 local function filterMarkedPoliceSpecs(group, count)
@@ -2213,6 +2214,7 @@ local function processMaximumHeat(dtReal)
   -- suspect role if RLS or a vehicle switch has replaced it.
   sanitizeStolenPoliceTraffic(playerId)
   local roleName = targetTraffic.role and targetTraffic.role.name or targetTraffic.roleName
+  local pursuitMode = targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
 
   local pending = pendingPoliceReserve
   if pending and not pendingReserveStillValid(pending) then
@@ -2220,26 +2222,12 @@ local function processMaximumHeat(dtReal)
     pending = nil
   end
   if pending then
-    if pending.reserveId then
-      if pending.settleTimer then
-        pending.settleTimer = pending.settleTimer - dtReal
-        if pending.settleTimer <= 0 then
-          local reserveTraffic = traffic[pending.reserveId]
-          local reserveObj = getObjectByID(pending.reserveId)
-          if reserveTraffic and reserveTraffic.state == "active" and reserveObj and reserveObj:getActive() then
-            finishPendingReservePursuit(pending, pending.reserveId)
-          else
-            pending.settleTimer = 0.25
-          end
-        end
-      end
-      return
-    end
+    if pending.reserveId then return end
 
     local responders = availablePoliceResponders(playerId, cfg.desiredPoliceResponders)
     if #responders > 0 then
       clearPendingPoliceReserve(pending)
-      if roleName ~= "suspect" then
+      if roleName ~= "suspect" or pursuitMode < 1 then
         beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
       end
     else
@@ -2250,7 +2238,7 @@ local function processMaximumHeat(dtReal)
 
   local responders = availablePoliceResponders(playerId, cfg.desiredPoliceResponders)
   if #responders > 0 then
-    if roleName ~= "suspect" then
+    if roleName ~= "suspect" or pursuitMode < 1 then
       beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
     end
   else
@@ -3211,6 +3199,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   -- Run the handoff guard before assigning/maintaining police pursuit.
   processCarjackArrestGrace(dtReal)
   processImmediateAlert(dtReal)
+  processPendingPoliceReserve(dtReal)
   processMaximumHeat(dtReal)
   processIdentityScan(dtReal)
   processDeferredWork(dtReal)

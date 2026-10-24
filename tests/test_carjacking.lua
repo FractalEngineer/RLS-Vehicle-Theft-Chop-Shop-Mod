@@ -417,10 +417,12 @@ assert(not sourceText:find("pool._updateFlag = true", 1, true),
   "removeTraffic already owns active-pool reconciliation")
 assert(sourceText:find("police.setupPursuitGameplay", 1, true),
   "RLS 2.8 pursuit integration must use the native setup helper")
-assert(not sourceText:find("police.setPursuitMode(cfg.policeCarjackLevel", 1, true),
-  "stolen police pursuit must not re-enter setPursuitMode directly")
-assert(sourceText:find("pursuit.score = math.max", 1, true),
-  "native pursuit setup must seed RLS pursuit score instead of calling setPursuitMode")
+assert(sourceText:find("preventAutoStart = true", 1, true),
+  "RLS 2.8 pursuit setup must suppress deferred auto-start")
+assert(sourceText:find("pcall(police.setPursuitMode, pursuitLevel, vehId, responders)", 1, true),
+  "RLS 2.8 pursuit setup must start the seeded level explicitly")
+assert(not sourceText:find("pursuit.score = math.max", 1, true),
+  "pursuit score seeding must not trigger RLS's deferred auto-start")
 assert(sourceText:find("reserved = 1", 1, true)
   and sourceText:find("ensureReservedVehicles", 1, true)
   and sourceText:find("useReservedVehicle", 1, true),
@@ -436,17 +438,22 @@ local nativeSetModeCalled = false
 local nativePolice = {
   setupPursuitGameplay = function(suspectId, policeIds, options)
     assert(suspectId == 10 and policeIds[1] == 20 and options.pursuitMode == 3)
+    assert(options.preventAutoStart == true)
     nativeTraffic[10].role.name = "suspect"
     return true
   end,
-  setPursuitMode = function() nativeSetModeCalled = true end,
+  setPursuitMode = function(mode, suspectId, policeIds)
+    assert(mode == 3 and suspectId == 10 and policeIds[1] == 20)
+    nativeSetModeCalled = true
+    nativeTraffic[10].pursuit.mode = mode
+  end,
   getPursuitVars = function() return {scoreLevels = {150, 900, 2800}} end,
 }
 local beginNativePursuit = upvalue(upvalue(overhaulMod.onUpdate, "processImmediateAlert"),
   "beginStolenPolicePursuit")
 assert(beginNativePursuit(nativePolice, 10, {20}, "test", 3))
-assert(nativeTraffic[10].role.name == "suspect" and nativeTraffic[10].pursuit.score == 2800)
-assert(not nativeSetModeCalled, "native pursuit setup must not call setPursuitMode directly")
+assert(nativeTraffic[10].role.name == "suspect" and nativeTraffic[10].pursuit.mode == 3)
+assert(nativeSetModeCalled, "native pursuit setup must start the seeded level explicitly")
 local reserveEnsured, reserveUseAttempts = 0, 0
 gameplay_traffic.ensureReservedVehicles = function(provider, count)
   assert(provider == "police" and count == 1)
@@ -469,6 +476,14 @@ overhaulMod.onTrafficReservedVehiclesReady("police")
 pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
 assert(reserveUseAttempts == 1 and pendingReserve.reserveId == 20 and pendingReserve.settleTimer == 0.75,
   "native police reserve must be claimed after its ready hook and settled before pursuit setup")
+nativeTraffic[20] = {state = "active"}
+s.objects[20] = {getActive = function() return true end}
+local processPendingReserve = upvalue(overhaulMod.onUpdate, "processPendingPoliceReserve")
+processPendingReserve(0.25)
+processPendingReserve(0.25)
+pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
+assert(math.abs(pendingReserve.settleTimer - 0.25) < 1e-9,
+  "native police reserve settle time must advance every frame")
 assert(sourceText:find('name = "police"', 1, true) and sourceText:find("filterMarkedPoliceSpecs", 1, true),
   "ambient police provider must prefer marked patrol configs")
 local filterMarked = upvalue(overhaulMod.onTrafficSpecialVehiclesProviders, "filterMarkedPoliceSpecs")
