@@ -2060,16 +2060,11 @@ local function processImmediateAlert(dtReal)
 
     if pendingImmediateAlert.maximumHeat then
       sanitizeStolenPoliceTraffic(vehId)
-      -- Always mark the stolen police car as a level-3 suspect, even if the
-      -- stolen unit was the only currently active police car. An empty police
-      -- list still sets the target pursuit mode in RLS.
-      pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, vehId, {}) end)
-
       local ids = ensurePoliceResponderCount(vehId, cfg.desiredPoliceResponders)
       if #ids > 0 then
         pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, vehId, ids) end)
       end
-      log("I", logTag, string.format("Police vehicle theft: maximum heat set, responders=%d", #ids))
+      log("I", logTag, string.format("Police vehicle theft: maximum heat queued, responders=%d", #ids))
     else
       local ids = nearbyPoliceIds(targetObj, cfg.immediateAlertRadius)
       if #ids > 0 then
@@ -2113,32 +2108,20 @@ local function processMaximumHeat(dtReal)
   local targetTraffic = traffic[playerId]
   if not targetTraffic then return end
 
-  -- RLS police resets its internal suspect-active flag whenever no police are
-  -- active. Preserve the actual target pursuit level independently.
-  local pursuitMode = targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
-  local roleName = targetTraffic.role and targetTraffic.role.name or targetTraffic.roleName
-  if pursuitMode < cfg.policeCarjackLevel or roleName ~= "suspect" then
-    pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, playerId, {}) end)
-  end
-
   -- Never allow the stolen police configuration itself to count as a cop.
   -- This also keeps autoRole='standard' if traffic refreshes the vehicle after
-  -- the player exits/resets it. Replacement spawning is done only once during
-  -- the initial theft alert; the maintenance loop only wakes existing cops.
+  -- the player exits/resets it. RLS 2.8 owns police spawning; this loop only
+  -- wakes and assigns responders that already exist.
   sanitizeStolenPoliceTraffic(playerId)
   local responders = wakePoliceResponders(playerId)
-  local unassigned = {}
-  local policeVehs = police.getPoliceVehicles and police.getPoliceVehicles() or {}
-  for _, policeId in ipairs(responders) do
-    local policeVeh = policeVehs[policeId]
-    if policeVeh and policeVeh.role and policeVeh.role.state ~= "disabled"
-      and policeVeh.role.targetId ~= playerId
-      and not policeCommittedToOtherPursuit(policeVeh, playerId) then
-      unassigned[#unassigned + 1] = policeId
-    end
-  end
-  if #unassigned > 0 then
-    pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, playerId, unassigned) end)
+
+  -- RLS 2.8 requires at least one real responder. Calling setPursuitMode with
+  -- an empty list corrupts the player-controlled police traffic lifecycle and
+  -- causes a stack overflow. Keep maximum heat pending until a responder exists.
+  local pursuitMode = targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
+  local roleName = targetTraffic.role and targetTraffic.role.name or targetTraffic.roleName
+  if #responders > 0 and (pursuitMode < cfg.policeCarjackLevel or roleName ~= "suspect") then
+    pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, playerId, responders) end)
   end
 end
 
