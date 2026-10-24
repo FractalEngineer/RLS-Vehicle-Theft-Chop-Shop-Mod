@@ -406,8 +406,7 @@ assert(gameplay_walk.toggleWalkingMode == originalToggle, "must not overwrite RL
 overhaulMod.onOverhaulActive(false)
 assert(patchUnregistered)
 
--- RLS 2.8 owns police spawning. The legacy manual fallback must stay disabled
--- even when no existing responder is visible yet.
+-- Police theft must create one fallback responder when nothing is available.
 local processAlert = upvalue(overhaulMod.onUpdate, "processImmediateAlert")
 local ensureResponderCount = upvalue(processAlert, "ensurePoliceResponderCount")
 local wakeResponders = upvalue(ensureResponderCount, "wakePoliceResponders")
@@ -424,7 +423,16 @@ for i = 1, 100 do
   if name == "countAvailablePoliceResponders" then debug.setupvalue(ensureResponderCount, i, availableResponders) end
   if name == "spawnPoliceResponder" then debug.setupvalue(ensureResponderCount, i, spawnResponder) end
 end
-assert(#ensureResponderCount(1, 1) == 0 and not spawnedFallback,
-  "RLS 2.8 must not use the legacy manual police spawn path")
+assert(#ensureResponderCount(1, 1) == 0 and spawnedFallback,
+  "police theft must create one fallback responder when none exist")
+local sourceText = assert(io.open(sourcePath, "r")):read("*a")
+assert(not sourceText:find("setPursuitMode(cfg.policeCarjackLevel, vehId, {})", 1, true),
+  "police heat must never be assigned with an empty responder list")
+assert(sourceText:find('getPool("autoTraffic")', 1, true),
+  "native traffic pool lookup must use the 0.40 pool name")
+assert(sourceText:find("gameplay_traffic.insertTraffic(policeId, false)", 1, true),
+  "fallback police must join the native traffic pool")
+assert(not sourceText:find("pool._updateFlag = true", 1, true),
+  "removeTraffic already owns active-pool reconciliation")
 
 print("PASS: strip confirmation/transactions, identity valuation/migration, parking, traffic")

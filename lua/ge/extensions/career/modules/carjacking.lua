@@ -287,7 +287,9 @@ local function getNativeTrafficPool()
     pooling = rawget(extensions, "core_vehicleActivePooling")
   end
   if type(pooling) ~= "table" or type(pooling.getPool) ~= "function" then return nil end
-  local ok, pool = pcall(function() return pooling.getPool("traffic") end)
+  local ok, pool = pcall(function()
+    return pooling.getPool("autoTraffic") or pooling.getPool("traffic")
+  end)
   return ok and pool or nil
 end
 
@@ -327,11 +329,6 @@ local function markTrafficReplacementDebt(vehId, snapshot, obj)
     -- traffic on its own.
     trafficReplacementDebts[vehId] = nil
   end
-end
-
-local function flagNativeTrafficPoolUpdate()
-  local pool = getNativeTrafficPool()
-  if pool then pool._updateFlag = true end
 end
 
 local function firstReadyTrafficDebt()
@@ -1302,7 +1299,7 @@ local function wakePoliceResponders(targetId)
   local police = getPoliceModule()
   if not police or not police.getPoliceVehicles then return result end
 
-  local pool = gameplay_traffic and gameplay_traffic.getTrafficPool and gameplay_traffic.getTrafficPool() or nil
+  local pool = getNativeTrafficPool()
 
   for policeId, policeVeh in pairs(police.getPoliceVehicles() or {}) do
     if policeId ~= targetId and not policeCommittedToOtherPursuit(policeVeh, targetId) then
@@ -1389,19 +1386,15 @@ local function spawnPoliceResponder(targetId)
 
   local policeId = obj:getID()
   spawnedPoliceResponderIds[policeId] = true
-  pcall(function() gameplay_traffic.insertTraffic(policeId, false, true) end)
+  -- Insert the fallback as normal editable traffic so BeamNG owns its pool
+  -- membership, activation and later despawn. Passing the ignore-pool flag
+  -- creates a responder that exists outside the traffic lifecycle.
+  pcall(function() gameplay_traffic.insertTraffic(policeId, false) end)
 
   local traffic = gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
   local trafficData = traffic[policeId]
   if trafficData and trafficData.setRole and getVehicleRoleName(trafficData) ~= "police" then
     pcall(function() trafficData:setRole("police") end)
-  end
-
-  local police = getPoliceModule()
-  if police and police.onTrafficVehicleAdded then
-    -- insertTraffic normally fires this itself, but run it once more after role
-    -- assignment in case the traffic object was initially registered as standard.
-    pcall(function() police.onTrafficVehicleAdded(policeId) end)
   end
 
   if gameplay_traffic.forceTeleport then
@@ -1416,14 +1409,9 @@ local function ensurePoliceResponderCount(targetId, desired)
   -- This is called only for the initial police-car theft alert. Never run a
   -- spawn loop: if police registration is delayed by a frame, a loop can create
   -- a whole convoy of replacements before the first unit appears in policeVehs.
-  -- Wake RLS's existing pool first, and create at most one marked fallback.
+  -- Wake RLS's existing pool first, then create at most one marked fallback.
   local responders = wakePoliceResponders(targetId)
-  -- RLS 2.8 owns police spawning and pooling through its integration service.
-  -- Directly inserting a replacement outside that service can recurse through
-  -- the new traffic lifecycle. Maximum heat still starts with zero responders,
-  -- and RLS can fill the pursuit from its own pool.
-  local usesNativePoliceTraffic = rawget(_G, "overhaul_integration_services_police") ~= nil
-  if not usesNativePoliceTraffic and #responders < desired and countAvailablePoliceResponders(targetId) < desired then
+  if #responders < desired and countAvailablePoliceResponders(targetId) < desired then
     spawnPoliceResponder(targetId)
     responders = wakePoliceResponders(targetId)
   end
@@ -1473,10 +1461,6 @@ local function completeCarjack(vehId, wasPoliceVehicle)
 
   if gameplay_traffic.removeTraffic then
     pcall(function() gameplay_traffic.removeTraffic(vehId, true) end)
-    -- Mirror BeamNG's own onVehicleDestroyed traffic path: after removing a
-    -- traffic object, mark the native pool dirty so it can reconcile its active
-    -- and inactive members without our mod micromanaging the pool.
-    flagNativeTrafficPoolUpdate()
   end
   if gameplay_walk.removeVehicleFromBlacklist then
     pcall(function() gameplay_walk.removeVehicleFromBlacklist(vehId) end)
