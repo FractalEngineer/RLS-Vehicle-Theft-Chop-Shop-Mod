@@ -17,9 +17,9 @@ RLS 2.8.0 compatibility work:
 - Re-audited the add-on against BeamNG.drive 0.40.3 `gameplay_traffic` and `core_vehicleActivePooling`.
 - Corrected the traffic pool name from the obsolete `traffic` lookup to 0.40's `autoTraffic` pool.
 - Removed the redundant `_updateFlag` write after `removeTraffic`; native 0.40 already removes the vehicle from the active pool and triggers an active-count update.
-- Removed the legacy manual police fallback spawner entirely. RLS 2.8 owns police spawning, activation, responder registration and the traffic-pool lifecycle.
+- Removed the legacy manual police fallback spawner entirely. When stealing the last police unit, the add-on requests and claims one marked police reserve through BeamNG's native `ensureReservedVehicles` / `useReservedVehicle` provider API.
 - Moved police pursuit startup to RLS 2.8's native `setupPursuitGameplay`, avoiding the direct `setPursuitMode` re-entry that caused stack overflows.
-- Ambient police provider now filters `unmarked`/`undercover` configs and uses marked patrol fallbacks if its sample contains none, so undercover models cannot leak into the preference path.
+- Ambient police provider now filters `unmarked`/`undercover` configs, uses marked patrol fallbacks if its sample contains none, and keeps one marked reserve available for the theft response.
 
 v0.3.1 issue-tracker work:
 - Re-audited installed RLS 2.7.2 after the latest user update.

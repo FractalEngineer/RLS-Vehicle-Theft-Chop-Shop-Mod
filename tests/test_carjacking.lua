@@ -421,6 +421,10 @@ assert(not sourceText:find("police.setPursuitMode(cfg.policeCarjackLevel", 1, tr
   "stolen police pursuit must not re-enter setPursuitMode directly")
 assert(sourceText:find("pursuit.score = math.max", 1, true),
   "native pursuit setup must seed RLS pursuit score instead of calling setPursuitMode")
+assert(sourceText:find("reserved = 1", 1, true)
+  and sourceText:find("ensureReservedVehicles", 1, true)
+  and sourceText:find("useReservedVehicle", 1, true),
+  "police heat must refill and claim a native reserved police vehicle")
 local nativeTraffic = {
   [10] = {
     role = {name = "standard"},
@@ -443,6 +447,22 @@ local beginNativePursuit = upvalue(upvalue(overhaulMod.onUpdate, "processImmedia
 assert(beginNativePursuit(nativePolice, 10, {20}, "test", 3))
 assert(nativeTraffic[10].role.name == "suspect" and nativeTraffic[10].pursuit.score == 2800)
 assert(not nativeSetModeCalled, "native pursuit setup must not call setPursuitMode directly")
+local reserveEnsured, reserveUseAttempts = 0, 0
+gameplay_traffic.ensureReservedVehicles = function(provider, count)
+  assert(provider == "police" and count == 1)
+  reserveEnsured = reserveEnsured + 1
+  return true
+end
+gameplay_traffic.useReservedVehicle = function(provider, count)
+  assert(provider == "police" and count == 1)
+  reserveUseAttempts = reserveUseAttempts + 1
+  return reserveEnsured > 0 and reserveUseAttempts > 1 and {20} or {}
+end
+local processMaximumHeat = upvalue(overhaulMod.onUpdate, "processMaximumHeat")
+local acquireReserve = upvalue(processMaximumHeat, "acquireNativePoliceReserve")
+local claimedReserve = acquireReserve()
+assert(reserveEnsured == 1 and reserveUseAttempts == 2 and claimedReserve[1] == 20,
+  "native police reserve must be requested and then claimed through BeamNG's provider API")
 assert(sourceText:find('name = "police"', 1, true) and sourceText:find("filterMarkedPoliceSpecs", 1, true),
   "ambient police provider must prefer marked patrol configs")
 local filterMarked = upvalue(overhaulMod.onTrafficSpecialVehiclesProviders, "filterMarkedPoliceSpecs")

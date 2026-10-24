@@ -94,4 +94,4 @@ After changing a value, save the file and fully restart BeamNG before testing it
 | `identityChangeCostMultiplier` | `0.35` | Cost of changing a stolen vehicle's identity as a fraction of its current market value. `0.35` means 35%. |
 | `identityChangeDurationSeconds` | `0` | Time in real-world seconds for **Change Vehicle Identity** to complete after payment. `0` makes it instant. |
 | `carjackArrestGraceSeconds` | `4.0` | Short grace period in seconds after taking control of a stolen vehicle before an existing nearby pursuit can complete an arrest. |
-| `desiredPoliceResponders` | `1` | Maximum number of existing police units passed to RLS when setting up a stolen-police pursuit. The add-on does not spawn police vehicles itself. |
+| `desiredPoliceResponders` | `1` | Maximum number of existing police units passed to RLS when setting up a stolen-police pursuit. If none remain, one marked police reserve is requested through BeamNG's native provider API. |

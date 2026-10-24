@@ -98,8 +98,8 @@ local cfg = {
   -- but the arrest timer is held at zero for this short grace period.
   carjackArrestGraceSeconds = 4.0,
 
-  -- Collect the nearest eligible RLS police units for native pursuit setup.
-  -- RLS remains responsible for spawning, activating and pooling responders.
+  -- Prefer the nearest eligible RLS police unit for native pursuit setup. If
+  -- traffic has no spare police, claim one from BeamNG's native provider reserve.
   desiredPoliceResponders = 1,
 
 }
@@ -1308,7 +1308,8 @@ local function availablePoliceResponders(targetId, limit)
     if policeId ~= targetId and not policeCommittedToOtherPursuit(policeVeh, targetId) then
       local policeObj = getObjectByID(policeId)
       local roleState = policeVeh and policeVeh.role and policeVeh.role.state or nil
-      if policeObj and roleState ~= "disabled" then
+      local dormantReserve = policeVeh and policeVeh.reserved and not policeVeh.claimed
+      if policeObj and roleState ~= "disabled" and not dormantReserve then
         local distance = math.huge
         if targetPos then
           local ok, measured = pcall(function() return targetPos:distance(policeObj:getPosition()) end)
@@ -1330,8 +1331,28 @@ local function availablePoliceResponders(targetId, limit)
   return result
 end
 
+local function acquireNativePoliceReserve()
+  if not gameplay_traffic then return {} end
+
+  local function claim()
+    if type(gameplay_traffic.useReservedVehicle) ~= "function" then return nil end
+    local ok, claimed = pcall(gameplay_traffic.useReservedVehicle, "police", 1)
+    if ok and type(claimed) == "table" and claimed[1] then return claimed end
+    return nil
+  end
+
+  local claimed = claim()
+  if claimed then return claimed end
+
+  if type(gameplay_traffic.ensureReservedVehicles) == "function" then
+    pcall(gameplay_traffic.ensureReservedVehicles, "police", 1)
+    claimed = claim()
+  end
+  return claimed or {}
+end
+
 local function beginStolenPolicePursuit(police, vehId, responders, label, pursuitLevel)
-  if not police or not vehId or type(responders) ~= "table" then return false end
+  if not police or not vehId or type(responders) ~= "table" or #responders == 0 then return false end
   pursuitLevel = tonumber(pursuitLevel) or cfg.policeCarjackLevel
 
   -- RLS 2.8 expects external integrations to seed the suspect and police roles
@@ -1339,8 +1360,7 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
   -- its native traffic tick. Calling setPursuitMode directly from another
   -- extension's update callback re-enters the police hook chain.
   if type(police.setupPursuitGameplay) == "function" then
-    local nativeResponders = #responders > 0 and responders or nil
-    local ok, started = pcall(police.setupPursuitGameplay, vehId, nativeResponders, {
+    local ok, started = pcall(police.setupPursuitGameplay, vehId, responders, {
       playerId = vehId,
       pursuitMode = pursuitLevel,
       preventAutoStart = false
@@ -1372,7 +1392,6 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
   end
 
   -- Legacy RLS has no setup helper and starts a pursuit directly.
-  if #responders == 0 then return false end
   local ok = pcall(function() police.setPursuitMode(pursuitLevel, vehId, responders) end)
   if not ok then log("E", logTag, label .. ": legacy pursuit setup failed") end
   return ok
@@ -1421,6 +1440,7 @@ local function onTrafficSpecialVehiclesProviders()
     name = "police",
     priority = 10,
     minTotalAmount = 0,
+    reserved = 1,
     getDesiredCount = function(totalAmount, options)
       if not options.police then return 0 end
       return math.ceil(totalAmount * 0.05)
@@ -2056,8 +2076,12 @@ local function processImmediateAlert(dtReal)
     if pendingImmediateAlert.maximumHeat then
       sanitizeStolenPoliceTraffic(vehId)
       local ids = availablePoliceResponders(vehId, cfg.desiredPoliceResponders)
+      if #ids == 0 then ids = acquireNativePoliceReserve() end
       beginStolenPolicePursuit(police, vehId, ids, "Police theft alert")
-      log("I", logTag, string.format("Police vehicle theft: maximum heat queued, responders=%d", #ids))
+      log("I", logTag, string.format(
+        "Police vehicle theft: maximum heat %s, responders=%d",
+        #ids > 0 and "queued" or "waiting for native police reserve",
+        #ids))
     else
       local ids = nearbyPoliceIds(targetObj, cfg.immediateAlertRadius)
       if #ids > 0 then
@@ -2106,9 +2130,10 @@ local function processMaximumHeat(dtReal)
   -- suspect role if RLS or a vehicle switch has replaced it.
   sanitizeStolenPoliceTraffic(playerId)
   local responders = availablePoliceResponders(playerId, cfg.desiredPoliceResponders)
+  if #responders == 0 then responders = acquireNativePoliceReserve() end
 
   local roleName = targetTraffic.role and targetTraffic.role.name or targetTraffic.roleName
-  if roleName ~= "suspect" then
+  if #responders > 0 and roleName ~= "suspect" then
     beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
   end
 end
