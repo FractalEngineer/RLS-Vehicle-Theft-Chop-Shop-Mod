@@ -68,6 +68,7 @@ local cfg = {
   -- Shell traffic cannot become a valid career vehicle: it has placeholder
   -- parts and may be worth only a few hundred dollars even after laundering.
   requireFullDetailTrafficVehicles = true,
+  preferMarkedPoliceTraffic = true,
 
   -- Sale-vehicle hotwiring. The action only appears while the player is
   -- sitting in an inspected-for-sale vehicle outside an active test drive.
@@ -1418,6 +1419,72 @@ local function ensurePoliceResponderCount(targetId, desired)
   return responders
 end
 
+local function beginStolenPolicePursuit(police, vehId, responders, label)
+  if not police or not vehId or type(responders) ~= "table" or #responders == 0 then return false end
+
+  -- RLS 2.8 expects external integrations to seed the suspect and police roles
+  -- through setupPursuitGameplay. The suspect role then starts the pursuit from
+  -- its native traffic tick. Calling setPursuitMode directly from another
+  -- extension's update callback re-enters the police hook chain.
+  if type(police.setupPursuitGameplay) == "function" then
+    local ok, started = pcall(police.setupPursuitGameplay, vehId, responders, {
+      playerId = vehId,
+      pursuitMode = cfg.policeCarjackLevel,
+      preventAutoStart = false
+    })
+    if ok and started ~= false then return true end
+    log("W", logTag, string.format("%s: native pursuit setup failed (%s)", label, tostring(started)))
+    return false
+  end
+
+  -- Legacy RLS has no setup helper and starts a pursuit directly.
+  local pursuitLevel = cfg.policeCarjackLevel
+  local ok = pcall(function() police.setPursuitMode(pursuitLevel, vehId, responders) end)
+  if not ok then log("E", logTag, label .. ": legacy pursuit setup failed") end
+  return ok
+end
+
+local function filterMarkedPoliceSpecs(group, count)
+  if type(group) ~= "table" or #group == 0 then return nil end
+  local marked = {}
+  for _, spec in ipairs(group) do
+    local config = type(spec) == "table" and tostring(spec.config or "") or ""
+    local lower = config:lower()
+    if not lower:find("unmarked", 1, true) and not lower:find("undercover", 1, true) then
+      marked[#marked + 1] = spec
+      if #marked >= count then break end
+    end
+  end
+  return marked[1] and marked or group
+end
+
+local function onTrafficSpecialVehiclesProviders()
+  if not cfg.preferMarkedPoliceTraffic then return end
+  local trafficUtils = rawget(_G, "gameplay_traffic_trafficUtils")
+  if not gameplay_traffic or type(gameplay_traffic.registerSpecialVehicleProvider) ~= "function"
+    or not trafficUtils or type(trafficUtils.createPoliceGroup) ~= "function" then
+    return
+  end
+
+  -- Replace the generic police provider with the same population budget, but
+  -- prefer marked patrol configurations. Oversampling keeps the requested
+  -- count while avoiding the 50/50 marked/undercover mix of all police configs.
+  gameplay_traffic.registerSpecialVehicleProvider({
+    name = "police",
+    priority = 10,
+    minTotalAmount = 0,
+    getDesiredCount = function(totalAmount, options)
+      if not options.police then return 0 end
+      return math.ceil(totalAmount * 0.05)
+    end,
+    buildGroup = function(count)
+      local sampleCount = math.max(count * 3, count + 2)
+      local group = trafficUtils.createPoliceGroup(sampleCount)
+      return filterMarkedPoliceSpecs(group, count)
+    end
+  })
+end
+
 local function scheduleImmediateAlert(vehId, inventoryId, maximumHeat)
   pendingImmediateAlert = {
     vehId = vehId,
@@ -2045,9 +2112,7 @@ local function processImmediateAlert(dtReal)
     if pendingImmediateAlert.maximumHeat then
       sanitizeStolenPoliceTraffic(vehId)
       local ids = ensurePoliceResponderCount(vehId, cfg.desiredPoliceResponders)
-      if #ids > 0 then
-        pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, vehId, ids) end)
-      end
+      beginStolenPolicePursuit(police, vehId, ids, "Police theft alert")
       log("I", logTag, string.format("Police vehicle theft: maximum heat queued, responders=%d", #ids))
     else
       local ids = nearbyPoliceIds(targetObj, cfg.immediateAlertRadius)
@@ -2104,8 +2169,8 @@ local function processMaximumHeat(dtReal)
   -- causes a stack overflow. Keep maximum heat pending until a responder exists.
   local pursuitMode = targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
   local roleName = targetTraffic.role and targetTraffic.role.name or targetTraffic.roleName
-  if #responders > 0 and (pursuitMode < cfg.policeCarjackLevel or roleName ~= "suspect") then
-    pcall(function() police.setPursuitMode(cfg.policeCarjackLevel, playerId, responders) end)
+  if #responders > 0 and roleName ~= "suspect" then
+    beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
   end
 end
 
@@ -3299,6 +3364,7 @@ M.onOverhaulAddedVehiclePartsToInventory = onAddedVehiclePartsToInventory
 M.onOverhaulVehiclePartConditionsChanged = onVehiclePartConditionsChanged
 M.onOverhaulRepairInGarage = onRepairInGarage
 M.onOverhaulComputerAddFunctions = onComputerAddFunctions
+M.onTrafficSpecialVehiclesProviders = onTrafficSpecialVehiclesProviders
 M.onExtensionUnloaded = onExtensionUnloaded
 
 refreshRlsModules()

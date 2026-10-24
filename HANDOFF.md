@@ -18,6 +18,8 @@ RLS 2.8.0 compatibility work:
 - Corrected the traffic pool name from the obsolete `traffic` lookup to 0.40's `autoTraffic` pool.
 - Removed the redundant `_updateFlag` write after `removeTraffic`; native 0.40 already removes the vehicle from the active pool and triggers an active-count update.
 - Restored the single marked police fallback, but inserted it without `ignoreVehPool` so BeamNG owns its activation, respawn and later despawn lifecycle.
+- Moved police pursuit startup to RLS 2.8's native `setupPursuitGameplay`, avoiding the direct `setPursuitMode` re-entry that caused stack overflows.
+- Ambient police provider now oversamples and filters `unmarked`/`undercover` configs while preserving RLS's requested police population.
 
 v0.3.1 issue-tracker work:
 - Re-audited installed RLS 2.7.2 after the latest user update.

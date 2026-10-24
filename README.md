@@ -86,6 +86,7 @@ After changing a value, save the file and fully restart BeamNG before testing it
 | `stolenValueMultiplier` | `0.35` | Multiplier applied to a stolen vehicle's normal market value. `0.35` means 35% of normal value. |
 | `stripPartsMultiplier` | `0.05` | Fraction of current vehicle value paid when using **Strip for Parts**. `0.05` means a 5% payout. |
 | `allowPoliceVehicles` | `true` | Set to `false` to prevent police vehicles from being stolen. |
+| `preferMarkedPoliceTraffic` | `true` | Prefer marked patrol configurations for ambient police traffic instead of RLS's mixed marked/undercover selection. |
 | `requireFullDetailTrafficVehicles` | `true` | Keeps simplified traffic shells out of career inventory and disables BeamNG's simplified-traffic option while the add-on is active. Set to `false` to accept shell vehicles with placeholder parts and values. |
 | `allowSaleVehicleHotwire` | `true` | Enables the **Hotwire** action for inspected vehicles that are for sale. |
 | `allowPrivateSellerHotwire` | `true` | Allows vehicles from private marketplace sellers to be hotwired. |

@@ -434,5 +434,20 @@ assert(sourceText:find("gameplay_traffic.insertTraffic(policeId, false)", 1, tru
   "fallback police must join the native traffic pool")
 assert(not sourceText:find("pool._updateFlag = true", 1, true),
   "removeTraffic already owns active-pool reconciliation")
+assert(sourceText:find("police.setupPursuitGameplay", 1, true),
+  "RLS 2.8 pursuit integration must use the native setup helper")
+assert(not sourceText:find("police.setPursuitMode(cfg.policeCarjackLevel", 1, true),
+  "stolen police pursuit must not re-enter setPursuitMode directly")
+assert(sourceText:find('name = "police"', 1, true) and sourceText:find("filterMarkedPoliceSpecs", 1, true),
+  "ambient police provider must prefer marked patrol configs")
+local filterMarked = upvalue(overhaulMod.onTrafficSpecialVehiclesProviders, "filterMarkedPoliceSpecs")
+local markedGroup = filterMarked({
+  {model = "fullsize", config = "bcpd"},
+  {model = "bastion", config = "police_unmarked_v8_awd_A"},
+  {model = "roamer", config = "police"},
+  {model = "roamer", config = "undercover"},
+}, 2)
+assert(#markedGroup == 2)
+assert(markedGroup[1].config == "bcpd" and markedGroup[2].config == "police")
 
 print("PASS: strip confirmation/transactions, identity valuation/migration, parking, traffic")
