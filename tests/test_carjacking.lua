@@ -456,13 +456,19 @@ end
 gameplay_traffic.useReservedVehicle = function(provider, count)
   assert(provider == "police" and count == 1)
   reserveUseAttempts = reserveUseAttempts + 1
-  return reserveEnsured > 0 and reserveUseAttempts > 1 and {20} or {}
+  return {20}
 end
 local processMaximumHeat = upvalue(overhaulMod.onUpdate, "processMaximumHeat")
-local acquireReserve = upvalue(processMaximumHeat, "acquireNativePoliceReserve")
-local claimedReserve = acquireReserve()
-assert(reserveEnsured == 1 and reserveUseAttempts == 2 and claimedReserve[1] == 20,
-  "native police reserve must be requested and then claimed through BeamNG's provider API")
+local requestReserve = upvalue(processMaximumHeat, "requestNativePoliceReserve")
+local pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
+s.objects[10] = {getActive = function() return true end}
+be.getPlayerVehicleID = function() return 10 end
+overhaul_career_garage_inventory.getInventoryIdFromVehicleId = function(id) return id == 10 and 7 or nil end
+assert(requestReserve(10, 7) and reserveEnsured == 1)
+overhaulMod.onTrafficReservedVehiclesReady("police")
+pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
+assert(reserveUseAttempts == 1 and pendingReserve.reserveId == 20 and pendingReserve.settleTimer == 0.75,
+  "native police reserve must be claimed after its ready hook and settled before pursuit setup")
 assert(sourceText:find('name = "police"', 1, true) and sourceText:find("filterMarkedPoliceSpecs", 1, true),
   "ambient police provider must prefer marked patrol configs")
 local filterMarked = upvalue(overhaulMod.onTrafficSpecialVehiclesProviders, "filterMarkedPoliceSpecs")

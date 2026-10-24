@@ -142,6 +142,7 @@ local pendingHotwire
 local pendingHotwireRelease = {}
 
 local pendingImmediateAlert
+local pendingPoliceReserve
 local carjackArrestGrace = {}
 local pendingPaintRestore
 local pendingInventoryPaintSnapshots = {}
@@ -1331,24 +1332,18 @@ local function availablePoliceResponders(targetId, limit)
   return result
 end
 
-local function acquireNativePoliceReserve()
-  if not gameplay_traffic then return {} end
-
-  local function claim()
-    if type(gameplay_traffic.useReservedVehicle) ~= "function" then return nil end
-    local ok, claimed = pcall(gameplay_traffic.useReservedVehicle, "police", 1)
-    if ok and type(claimed) == "table" and claimed[1] then return claimed end
-    return nil
+local function requestNativePoliceReserve(vehId, inventoryId)
+  if not gameplay_traffic or type(gameplay_traffic.ensureReservedVehicles) ~= "function" then
+    return false
   end
+  if pendingPoliceReserve and pendingPoliceReserve.vehId == vehId then return true end
 
-  local claimed = claim()
-  if claimed then return claimed end
-
-  if type(gameplay_traffic.ensureReservedVehicles) == "function" then
-    pcall(gameplay_traffic.ensureReservedVehicles, "police", 1)
-    claimed = claim()
-  end
-  return claimed or {}
+  pendingPoliceReserve = {
+    vehId = vehId,
+    inventoryId = inventoryId
+  }
+  pcall(gameplay_traffic.ensureReservedVehicles, "police", 1)
+  return true
 end
 
 local function beginStolenPolicePursuit(police, vehId, responders, label, pursuitLevel)
@@ -1395,6 +1390,91 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
   local ok = pcall(function() police.setPursuitMode(pursuitLevel, vehId, responders) end)
   if not ok then log("E", logTag, label .. ": legacy pursuit setup failed") end
   return ok
+end
+
+local function pendingReserveStillValid(pending)
+  if not pending or pendingPoliceReserve ~= pending then return false end
+  if not getObjectByID(pending.vehId) then return false end
+  if be:getPlayerVehicleID(0) ~= pending.vehId then return false end
+  local inventoryId = career_modules_inventory.getInventoryIdFromVehicleId
+    and career_modules_inventory.getInventoryIdFromVehicleId(pending.vehId) or nil
+  return inventoryId == pending.inventoryId
+end
+
+local function clearPendingPoliceReserve(pending)
+  if pendingPoliceReserve == pending then pendingPoliceReserve = nil end
+end
+
+local function finishPendingReservePursuit(pending, policeId)
+  if not pendingReserveStillValid(pending) then
+    clearPendingPoliceReserve(pending)
+    return
+  end
+  local police = getPoliceModule()
+  local started = beginStolenPolicePursuit(
+    police, pending.vehId, {policeId}, "Native police reserve")
+  if started then
+    clearPendingPoliceReserve(pending)
+    log("I", logTag, string.format("Native police reserve %s is engaged", tostring(policeId)))
+  else
+    log("W", logTag, string.format("Native police reserve %s failed to start pursuit", tostring(policeId)))
+    clearPendingPoliceReserve(pending)
+  end
+end
+
+local function waitForReserveAndBegin(pending, policeId)
+  if type(core_jobsystem) ~= "table" or type(core_jobsystem.create) ~= "function" then
+    pending.reserveId = policeId
+    pending.settleTimer = 0.75
+    return
+  end
+
+  core_jobsystem.create(function(job)
+    local trafficVehicle
+    for _ = 1, 30 do
+      job.yield()
+      if not pendingReserveStillValid(pending) then
+        clearPendingPoliceReserve(pending)
+        return
+      end
+      trafficVehicle = gameplay_traffic.getTrafficData()[policeId]
+      local obj = getObjectByID(policeId)
+      if trafficVehicle and trafficVehicle.state == "active" and obj and obj:getActive() then
+        break
+      end
+    end
+    if trafficVehicle and trafficVehicle.state == "active" then
+      job.yield()
+      finishPendingReservePursuit(pending, policeId)
+    else
+      log("W", logTag, string.format("Native police reserve %s did not activate", tostring(policeId)))
+      clearPendingPoliceReserve(pending)
+    end
+  end)
+end
+
+local function claimPendingPoliceReserve(pending)
+  if not pendingReserveStillValid(pending) then
+    clearPendingPoliceReserve(pending)
+    return false
+  end
+  if pending.reserveId then return true end
+  if not gameplay_traffic or type(gameplay_traffic.useReservedVehicle) ~= "function" then
+    return false
+  end
+
+  local ok, claimed = pcall(gameplay_traffic.useReservedVehicle, "police", 1)
+  if not ok or type(claimed) ~= "table" or not claimed[1] then return false end
+  pending.reserveId = claimed[1]
+  log("I", logTag, string.format("Claimed native police reserve %s", tostring(pending.reserveId)))
+  waitForReserveAndBegin(pending, pending.reserveId)
+  return true
+end
+
+local function onTrafficReservedVehiclesReady(providerName)
+  if providerName ~= "police" then return end
+  local pending = pendingPoliceReserve
+  if pending then claimPendingPoliceReserve(pending) end
 end
 
 local function filterMarkedPoliceSpecs(group, count)
@@ -2076,8 +2156,11 @@ local function processImmediateAlert(dtReal)
     if pendingImmediateAlert.maximumHeat then
       sanitizeStolenPoliceTraffic(vehId)
       local ids = availablePoliceResponders(vehId, cfg.desiredPoliceResponders)
-      if #ids == 0 then ids = acquireNativePoliceReserve() end
-      beginStolenPolicePursuit(police, vehId, ids, "Police theft alert")
+      if #ids > 0 then
+        beginStolenPolicePursuit(police, vehId, ids, "Police theft alert")
+      else
+        requestNativePoliceReserve(vehId, pendingImmediateAlert.inventoryId)
+      end
       log("I", logTag, string.format(
         "Police vehicle theft: maximum heat %s, responders=%d",
         #ids > 0 and "queued" or "waiting for native police reserve",
@@ -2129,12 +2212,49 @@ local function processMaximumHeat(dtReal)
   -- RLS owns the police traffic lifecycle; this loop only re-seeds the native
   -- suspect role if RLS or a vehicle switch has replaced it.
   sanitizeStolenPoliceTraffic(playerId)
-  local responders = availablePoliceResponders(playerId, cfg.desiredPoliceResponders)
-  if #responders == 0 then responders = acquireNativePoliceReserve() end
-
   local roleName = targetTraffic.role and targetTraffic.role.name or targetTraffic.roleName
-  if #responders > 0 and roleName ~= "suspect" then
-    beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
+
+  local pending = pendingPoliceReserve
+  if pending and not pendingReserveStillValid(pending) then
+    clearPendingPoliceReserve(pending)
+    pending = nil
+  end
+  if pending then
+    if pending.reserveId then
+      if pending.settleTimer then
+        pending.settleTimer = pending.settleTimer - dtReal
+        if pending.settleTimer <= 0 then
+          local reserveTraffic = traffic[pending.reserveId]
+          local reserveObj = getObjectByID(pending.reserveId)
+          if reserveTraffic and reserveTraffic.state == "active" and reserveObj and reserveObj:getActive() then
+            finishPendingReservePursuit(pending, pending.reserveId)
+          else
+            pending.settleTimer = 0.25
+          end
+        end
+      end
+      return
+    end
+
+    local responders = availablePoliceResponders(playerId, cfg.desiredPoliceResponders)
+    if #responders > 0 then
+      clearPendingPoliceReserve(pending)
+      if roleName ~= "suspect" then
+        beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
+      end
+    else
+      claimPendingPoliceReserve(pending)
+    end
+    return
+  end
+
+  local responders = availablePoliceResponders(playerId, cfg.desiredPoliceResponders)
+  if #responders > 0 then
+    if roleName ~= "suspect" then
+      beginStolenPolicePursuit(police, playerId, responders, "Maximum heat")
+    end
+  else
+    requestNativePoliceReserve(playerId, inventoryId)
   end
 end
 
@@ -3265,6 +3385,7 @@ end
 
 local function onExtensionUnloaded()
   rlsIntegrationInitialized = false
+  pendingPoliceReserve = nil
   pendingHotwire = nil
   pendingHotwireRelease = {}
   quickAccessInitialized = false
@@ -3312,6 +3433,7 @@ M.onOverhaulVehiclePartConditionsChanged = onVehiclePartConditionsChanged
 M.onOverhaulRepairInGarage = onRepairInGarage
 M.onOverhaulComputerAddFunctions = onComputerAddFunctions
 M.onTrafficSpecialVehiclesProviders = onTrafficSpecialVehiclesProviders
+M.onTrafficReservedVehiclesReady = onTrafficReservedVehiclesReady
 M.onExtensionUnloaded = onExtensionUnloaded
 
 refreshRlsModules()
