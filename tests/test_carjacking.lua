@@ -406,38 +406,43 @@ assert(gameplay_walk.toggleWalkingMode == originalToggle, "must not overwrite RL
 overhaulMod.onOverhaulActive(false)
 assert(patchUnregistered)
 
--- Police theft must create one fallback responder when nothing is available.
-local processAlert = upvalue(overhaulMod.onUpdate, "processImmediateAlert")
-local ensureResponderCount = upvalue(processAlert, "ensurePoliceResponderCount")
-local wakeResponders = upvalue(ensureResponderCount, "wakePoliceResponders")
-local availableResponders = upvalue(ensureResponderCount, "countAvailablePoliceResponders")
-local spawnResponder = upvalue(ensureResponderCount, "spawnPoliceResponder")
-local spawnedFallback = false
-wakeResponders = function() return {} end
-availableResponders = function() return 0 end
-spawnResponder = function() spawnedFallback = true end
-for i = 1, 100 do
-  local name = debug.getupvalue(ensureResponderCount, i)
-  if not name then break end
-  if name == "wakePoliceResponders" then debug.setupvalue(ensureResponderCount, i, wakeResponders) end
-  if name == "countAvailablePoliceResponders" then debug.setupvalue(ensureResponderCount, i, availableResponders) end
-  if name == "spawnPoliceResponder" then debug.setupvalue(ensureResponderCount, i, spawnResponder) end
-end
-assert(#ensureResponderCount(1, 1) == 0 and spawnedFallback,
-  "police theft must create one fallback responder when none exist")
 local sourceText = assert(io.open(sourcePath, "r")):read("*a")
 assert(not sourceText:find("setPursuitMode(cfg.policeCarjackLevel, vehId, {})", 1, true),
   "police heat must never be assigned with an empty responder list")
 assert(sourceText:find('getPool("autoTraffic")', 1, true),
   "native traffic pool lookup must use the 0.40 pool name")
-assert(sourceText:find("gameplay_traffic.insertTraffic(policeId, false)", 1, true),
-  "fallback police must join the native traffic pool")
+assert(not sourceText:find("spawnPoliceResponder", 1, true),
+  "RLS 2.8 must own police spawning instead of the legacy fallback responder")
 assert(not sourceText:find("pool._updateFlag = true", 1, true),
   "removeTraffic already owns active-pool reconciliation")
 assert(sourceText:find("police.setupPursuitGameplay", 1, true),
   "RLS 2.8 pursuit integration must use the native setup helper")
 assert(not sourceText:find("police.setPursuitMode(cfg.policeCarjackLevel", 1, true),
   "stolen police pursuit must not re-enter setPursuitMode directly")
+assert(sourceText:find("pursuit.score = math.max", 1, true),
+  "native pursuit setup must seed RLS pursuit score instead of calling setPursuitMode")
+local nativeTraffic = {
+  [10] = {
+    role = {name = "standard"},
+    pursuit = {mode = 0, score = 0},
+  },
+}
+gameplay_traffic.getTrafficData = function() return nativeTraffic end
+local nativeSetModeCalled = false
+local nativePolice = {
+  setupPursuitGameplay = function(suspectId, policeIds, options)
+    assert(suspectId == 10 and policeIds[1] == 20 and options.pursuitMode == 3)
+    nativeTraffic[10].role.name = "suspect"
+    return true
+  end,
+  setPursuitMode = function() nativeSetModeCalled = true end,
+  getPursuitVars = function() return {scoreLevels = {150, 900, 2800}} end,
+}
+local beginNativePursuit = upvalue(upvalue(overhaulMod.onUpdate, "processImmediateAlert"),
+  "beginStolenPolicePursuit")
+assert(beginNativePursuit(nativePolice, 10, {20}, "test", 3))
+assert(nativeTraffic[10].role.name == "suspect" and nativeTraffic[10].pursuit.score == 2800)
+assert(not nativeSetModeCalled, "native pursuit setup must not call setPursuitMode directly")
 assert(sourceText:find('name = "police"', 1, true) and sourceText:find("filterMarkedPoliceSpecs", 1, true),
   "ambient police provider must prefer marked patrol configs")
 local filterMarked = upvalue(overhaulMod.onTrafficSpecialVehiclesProviders, "filterMarkedPoliceSpecs")
@@ -449,5 +454,12 @@ local markedGroup = filterMarked({
 }, 2)
 assert(#markedGroup == 2)
 assert(markedGroup[1].config == "bcpd" and markedGroup[2].config == "police")
+local fallbackGroup = filterMarked({
+  {model = "bastion", config = "police_unmarked_v8_awd_A"},
+  {model = "roamer", config = "undercover"},
+}, 2)
+assert(#fallbackGroup == 2)
+assert(fallbackGroup[1].config == "bcpd" and fallbackGroup[2].config == "police",
+  "marked police fallback must never leak undercover configurations")
 
 print("PASS: strip confirmation/transactions, identity valuation/migration, parking, traffic")
