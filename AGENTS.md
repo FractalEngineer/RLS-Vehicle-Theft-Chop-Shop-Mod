@@ -207,9 +207,9 @@ Preserve:
 
 Automated speed/red-light camera fines remain exempt for stolen vehicles according to the current implementation.
 
-### Removed feature
+### Abandon
 
-The old **Abandon** feature is intentionally absent. Do not reintroduce it unless explicitly requested.
+**Abandon Vehicle (Free)** removes an owned vehicle that is currently spawned in the world. It must remain behind a destructive confirmation popup, must not charge money, and must not pay a sale or scrap payout. Use RLS's inventory removal API so garage bindings, damage state and other native cleanup run normally. Stored vehicles are not eligible for remote abandonment.
 
 ---
 
@@ -262,7 +262,7 @@ If the checked-out v0.2.14 source differs, inspect why before "correcting" it.
 - Taxi-specific state/config/ID heuristics repeatedly failed; normal-enterable-vehicle priority is the working solution.
 - Old physical license-plate-removal detection was replaced by **Change Vehicle Identity**.
 - `walkerDistanceToVehicle()` was accidentally removed in one historical build and caused a fatal police-car theft error.
-- **Abandon** must stay removed.
+- **Abandon** must remain free, confirmation-bound, and restricted to vehicles currently in the world.
 
 ---
 
@@ -352,7 +352,7 @@ Before packaging:
 5. Verify metadata version and ZIP filename match.
 6. Do not invent numeric BeamNG `resource_id` or `resource_version_id`.
 7. Verify no `_archived` filename.
-8. Verify no Abandon references.
+8. Verify **Abandon Vehicle (Free)** has a confirmation popup, charges no fee and pays no proceeds.
 9. ZIP must contain exactly:
    ```text
    README.md

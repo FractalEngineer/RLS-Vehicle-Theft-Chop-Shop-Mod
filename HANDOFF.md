@@ -21,6 +21,8 @@ RLS 2.8.0 compatibility work:
 - Police pursuit startup now uses RLS 2.8's native `setupPursuitGameplay` with deferred auto-start disabled, then starts the selected level explicitly after the responder is active. This avoids the deferred suspect-tick re-entry that caused stack overflows.
 - Ambient police provider now filters `unmarked`/`undercover` configs, uses marked patrol fallbacks if its sample contains none, and keeps one marked reserve available for the theft response.
 - Native reserve settle time is processed every frame instead of through the once-per-second maximum-heat scan.
+- Police responder selection now requires an active object and an active traffic record. Failed native setup/start calls log a bounded Lua traceback to identify the remaining RLS JSON serialization recursion.
+- Added **Abandon Vehicle (Free)** to the garage computer. It opens RLS's vehicle picker and permanently removes an owned, currently spawned vehicle after a destructive confirmation, with no fee and no payout.
 
 v0.3.1 issue-tracker work:
 - Re-audited installed RLS 2.7.2 after the latest user update.
@@ -361,8 +363,8 @@ Several speculative reset approaches failed in older builds. v0.2.14 is the know
 ### Plate system
 Old physical-license-plate-removal detection was intentionally replaced by **Change Vehicle Identity**.
 
-### Removed feature
-**Abandon** is intentionally removed.
+### Abandon
+**Abandon Vehicle (Free)** is available from the garage computer. It opens the native vehicle picker and can remove an owned vehicle that is currently spawned in the world after a destructive confirmation popup. It charges no fee and pays no proceeds. Stored vehicles are excluded.
 
 ---
 
@@ -432,7 +434,7 @@ Validate:
 - resource tag is `M3Z1BLS58`;
 - metadata version matches package filename;
 - no `_archived`;
-- no Abandon references;
+- Abandon is free and confirmation-bound;
 - no backup/temp files in package;
 - ZIP integrity passes.
 

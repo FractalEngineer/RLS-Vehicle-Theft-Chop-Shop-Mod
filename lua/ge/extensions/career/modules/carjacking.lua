@@ -135,6 +135,7 @@ local observedSpawnedVehicles = {}
 local pendingSafePark = {}
 local pendingStrips = {}
 local stripRequestSerial = 0
+local vehicleDisposal = {pending = {}, serial = 0}
 
 -- Sale-vehicle hotwire / radial-menu state.
 local quickAccessInitialized = false
@@ -182,6 +183,13 @@ end
 
 local function nowPersistentTime()
   return os.time()
+end
+
+vehicleDisposal.traceLuaError = function(err)
+  local messageText = tostring(err)
+  local ok, trace = pcall(debug.traceback, messageText, 3)
+  if not ok or type(trace) ~= "string" then return messageText end
+  return trace:sub(1, 4000)
 end
 
 local function getPoliceModule()
@@ -1310,7 +1318,9 @@ local function availablePoliceResponders(targetId, limit)
       local policeObj = getObjectByID(policeId)
       local roleState = policeVeh and policeVeh.role and policeVeh.role.state or nil
       local dormantReserve = policeVeh and policeVeh.reserved and not policeVeh.claimed
-      if policeObj and roleState ~= "disabled" and not dormantReserve then
+      local active = be and be.getObjectActive and be:getObjectActive(policeId)
+      local trafficActive = policeVeh and policeVeh.state == "active"
+      if policeObj and active and trafficActive and roleState ~= "disabled" and not dormantReserve then
         local distance = math.huge
         if targetPos then
           local ok, measured = pcall(function() return targetPos:distance(policeObj:getPosition()) end)
@@ -1355,11 +1365,13 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
   -- same settled handoff. Letting the deferred auto-start run can re-enter the
   -- police lifecycle while the newly claimed responder is still settling.
   if type(police.setupPursuitGameplay) == "function" then
-    local ok, started = pcall(police.setupPursuitGameplay, vehId, responders, {
-      playerId = vehId,
-      pursuitMode = pursuitLevel,
-      preventAutoStart = true
-    })
+    local ok, started = xpcall(function()
+      return police.setupPursuitGameplay(vehId, responders, {
+        playerId = vehId,
+        pursuitMode = pursuitLevel,
+        preventAutoStart = true
+      })
+    end, vehicleDisposal.traceLuaError)
     if not ok then
       log("W", logTag, string.format("%s: native pursuit setup failed (%s)", label, tostring(started)))
       return false
@@ -1377,7 +1389,9 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
       log("W", logTag, string.format("%s: native pursuit start API is unavailable", label))
       return false
     end
-    local startOk, startErr = pcall(police.setPursuitMode, pursuitLevel, vehId, responders)
+    local startOk, startErr = xpcall(function()
+      return police.setPursuitMode(pursuitLevel, vehId, responders)
+    end, vehicleDisposal.traceLuaError)
     if not startOk then
       log("W", logTag, string.format("%s: native pursuit start failed (%s)", label, tostring(startErr)))
       return false
@@ -2851,9 +2865,165 @@ local function stripVehicleForParts(inventoryId)
   return finishStrip()
 end
 
+vehicleDisposal.getTarget = function(inventoryId)
+  local vehicle = inventoryId and getInventoryVehicle(inventoryId) or nil
+  if not vehicle or vehicle.owned ~= true then
+    return nil, "Only owned vehicles can be abandoned."
+  end
+  if vehicle.timeToAccess then
+    return nil, "This vehicle is temporarily unavailable."
+  end
+  local listedForAuction = career_modules_inventory.isVehicleListedForAuction
+    and career_modules_inventory.isVehicleListedForAuction(inventoryId) or false
+  if listedForAuction then
+    return nil, "Remove the auction listing before abandoning this vehicle."
+  end
+
+  local vehId = career_modules_inventory.getVehicleIdFromInventoryId
+    and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
+  local obj = vehId and getObjectByID(vehId) or nil
+  if not obj then
+    return nil, "Only vehicles currently left in the world can be abandoned."
+  end
+  return vehicle, vehId
+end
+
+vehicleDisposal.hasAbandonableVehicle = function()
+  local vehicles = career_modules_inventory.getVehicles and career_modules_inventory.getVehicles() or {}
+  for inventoryId, vehicle in pairs(vehicles) do
+    if vehicle and vehicle.owned == true and vehicleDisposal.getTarget(inventoryId) then return true end
+  end
+  return false
+end
+
+vehicleDisposal.resolveConfirmation = function(inventoryId, token, confirmed)
+  inventoryId = tonumber(inventoryId) or inventoryId
+  local request = vehicleDisposal.pending[inventoryId]
+  if not request or request.token ~= token or not request.confirm then return false end
+  vehicleDisposal.pending[inventoryId] = nil
+  if confirmed ~= true then return false end
+  return request.confirm()
+end
+
+vehicleDisposal.abandon = function(inventoryId)
+  inventoryId = tonumber(inventoryId) or inventoryId
+  if not inventoryId or vehicleDisposal.pending[inventoryId] then return false end
+  local vehicle, vehId = vehicleDisposal.getTarget(inventoryId)
+  if not vehicle then
+    message(vehId or "This vehicle cannot be abandoned.", 4)
+    return false
+  end
+  if not guihooks or not guihooks.trigger then
+    message("Confirmation dialog is unavailable. Abandon cancelled.", 4)
+    return false
+  end
+
+  vehicleDisposal.serial = vehicleDisposal.serial + 1
+  local request = {
+    vehicle = vehicle,
+    vehId = vehId,
+    token = vehicleDisposal.serial
+  }
+  vehicleDisposal.pending[inventoryId] = request
+
+  request.confirm = function()
+    if getInventoryVehicle(inventoryId) ~= request.vehicle then return false end
+    local liveVehId = career_modules_inventory.getVehicleIdFromInventoryId
+      and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
+    if liveVehId ~= request.vehId or not getObjectByID(liveVehId) then
+      message("Vehicle location changed. Abandon cancelled.", 4)
+      return false
+    end
+    if type(career_modules_inventory.removeVehicle) ~= "function" then
+      message("RLS vehicle removal is unavailable. Vehicle was not abandoned.", 4)
+      return false
+    end
+
+    local ok, err = pcall(career_modules_inventory.removeVehicle, inventoryId)
+    if not ok or getInventoryVehicle(inventoryId) ~= nil then
+      log("E", logTag, "Abandon removal failed for " .. tostring(inventoryId) .. ": " .. tostring(err))
+      message("RLS could not abandon this vehicle. Check the game log.", 5)
+      return false
+    end
+
+    pendingStrips[inventoryId] = nil
+    vehicleDisposal.pending[inventoryId] = nil
+    pendingSafePark[inventoryId] = nil
+    carjackArrestGrace[inventoryId] = nil
+    trackedStolenInventoryIds[inventoryId] = nil
+    observedSpawnedVehicles[inventoryId] = nil
+    if career_modules_inventory.sendVehicleUpdatesToUi then
+      pcall(career_modules_inventory.sendVehicleUpdatesToUi)
+    end
+    requestCareerSave(0.1)
+    message("Vehicle abandoned. No fee was paid and no payout was received.", 4)
+    if career_career and career_career.closeAllMenus then
+      pcall(function() career_career.closeAllMenus() end)
+    end
+    return true
+  end
+
+  local name = plainLabel(vehicle.niceName) or plainLabel(vehicle.Name) or "Vehicle"
+  name = name:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&#39;")
+  local callback = string.format("career_modules_carjacking.resolveAbandonConfirmation(%q, %d, ", tostring(inventoryId), request.token)
+  local ok = pcall(function()
+    guihooks.trigger("showConfirmationDialog", {
+      title = "Abandon Vehicle?",
+      text = string.format("Permanently abandon <strong v-pre>%s</strong> (vehicle #%s)?<br>There is no fee and no payout. This removes the vehicle from your inventory and cannot be undone.", name, tostring(inventoryId)),
+      buttons = {
+        {label = "Cancel", luaCallback = callback .. "false)", isCancel = true, default = true},
+        {label = "Abandon Vehicle", luaCallback = callback .. "true)", isConfirm = true, isDestructive = true}
+      }
+    })
+  end)
+  if not ok then
+    vehicleDisposal.pending[inventoryId] = nil
+    message("Unable to show confirmation. Abandon cancelled.", 4)
+    return false
+  end
+  return true
+end
+
+vehicleDisposal.openPicker = function()
+  if type(career_modules_inventory.openMenu) ~= "function" then
+    message("The RLS vehicle picker is unavailable.", 4)
+    return false
+  end
+  local ok, err = pcall(function()
+    career_modules_inventory.openMenu({
+      {
+        callback = function(inventoryId) vehicleDisposal.abandon(inventoryId) end,
+        buttonText = "Abandon Vehicle (Free)",
+        repairRequired = false
+      }
+    }, "Abandon Vehicle", {
+      repairEnabled = false,
+      sellEnabled = false,
+      favoriteEnabled = false,
+      storingEnabled = false,
+      returnLoanerEnabled = false
+    })
+  end)
+  if not ok then
+    log("E", logTag, "Unable to open the abandon vehicle picker: " .. tostring(err))
+    message("Unable to open the vehicle picker. See the game log for details.", 5)
+    return false
+  end
+  return true
+end
+
 -- Add stolen-vehicle management actions to the garage computer.
 local function onComputerAddFunctions(menuData, computerFunctions)
   if not menuData or not computerFunctions or type(computerFunctions.vehicleSpecific) ~= "table" then return end
+
+  if vehicleDisposal.hasAbandonableVehicle() then
+    computerFunctions.general.rlsCarjackingAbandonVehicle = {
+      id = "rlsCarjackingAbandonVehicle",
+      label = "Abandon Vehicle (Free)",
+      callback = vehicleDisposal.openPicker,
+      order = 96
+    }
+  end
 
   for _, vehicleData in ipairs(menuData.vehiclesInGarage or {}) do
     local inventoryId = vehicleData.inventoryId
@@ -3384,6 +3554,7 @@ local function onExtensionUnloaded()
   observedSpawnedVehicles = {}
   pendingSafePark = {}
   pendingStrips = {}
+  vehicleDisposal.pending = {}
   pendingStreetIdentityRestore = {}
   pendingLaunderedIdentityRestore = {}
   restoreFullDetailTrafficVehicleSetting()
@@ -3396,6 +3567,7 @@ M.changeVehicleIdentity = changeVehicleIdentity
 M.changeVehicleVin = changeVehicleIdentity -- 0.2.0 compatibility alias
 M.stripVehicleForParts = stripVehicleForParts
 M.resolveStripConfirmation = resolveStripConfirmation
+M.resolveAbandonConfirmation = vehicleDisposal.resolveConfirmation
 M.hotwireSaleVehicle = function() return completeSaleVehicleHotwire(getHotwireCandidate()) end
 M.getConfig = function() return cfg end
 

@@ -40,6 +40,15 @@ local function fixture(value)
     getVehicleIdFromInventoryId = function(id) return state.ids[id] end,
     getInventoryIdFromVehicleId = function(id) return id == state.ids[7] and 7 or nil end,
     updatePartConditions = function(_, _, callback) state.callback = callback end,
+    removeVehicle = function(id)
+      state.removed = (state.removed or 0) + 1
+      state.vehicles[id] = nil
+      state.ids[id] = nil
+    end,
+    sendVehicleUpdatesToUi = function() state.uiUpdates = (state.uiUpdates or 0) + 1 end,
+    openMenu = function(buttons, header, active)
+      state.menu = {buttons = buttons, header = header, active = active}
+    end,
     sellVehicle = function(id, payout)
       state.sales = state.sales + 1
       state.paid = state.paid + payout
@@ -98,6 +107,25 @@ assert(s.sales == 1)
 s = fixture(100)
 s.vehicles[7].rlsCarjack = nil
 assert(not s.mod.stripVehicleForParts(7) and not s.callback, "ordinary owned vehicles cannot be stripped")
+s = fixture(100)
+s.vehicles[7].owned = true
+local disposal = upvalue(s.mod.onComputerAddFunctions, "vehicleDisposal")
+local abandonVehicle = disposal.abandon
+assert(abandonVehicle(7) and s.dialog, "abandon must use a confirmation popup")
+assert(s.dialog.buttons[1].default and s.dialog.buttons[1].isCancel)
+assert(s.dialog.buttons[2].isConfirm and s.dialog.buttons[2].isDestructive)
+assert(not s.dialog.text:find("$", 1, true), "abandon must be free")
+s.confirm(true)
+assert(s.removed == 1 and s.sales == 0 and s.paid == 0, "abandon must remove without a sale")
+s = fixture(100)
+s.vehicles[7].owned = true
+disposal = upvalue(s.mod.onComputerAddFunctions, "vehicleDisposal")
+abandonVehicle = disposal.abandon
+assert(abandonVehicle(7))
+s.confirm(false)
+assert(not s.removed, "cancelled abandon must keep the vehicle")
+s.ids[7] = nil
+assert(not abandonVehicle(7), "stored vehicles cannot be abandoned remotely")
 s = fixture(100)
 s.mod.stripVehicleForParts(7)
 s.callback()
@@ -419,7 +447,7 @@ assert(sourceText:find("police.setupPursuitGameplay", 1, true),
   "RLS 2.8 pursuit integration must use the native setup helper")
 assert(sourceText:find("preventAutoStart = true", 1, true),
   "RLS 2.8 pursuit setup must suppress deferred auto-start")
-assert(sourceText:find("pcall(police.setPursuitMode, pursuitLevel, vehId, responders)", 1, true),
+assert(sourceText:find("police.setPursuitMode(pursuitLevel, vehId, responders)", 1, true),
   "RLS 2.8 pursuit setup must start the seeded level explicitly")
 assert(not sourceText:find("pursuit.score = math.max", 1, true),
   "pursuit score seeding must not trigger RLS's deferred auto-start")

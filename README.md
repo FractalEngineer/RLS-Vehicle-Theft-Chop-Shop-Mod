@@ -27,6 +27,7 @@ Version **0.3.1**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul
 - Hotwiring dealership vehicles applies a configurable dealer reputation penalty.
 - Retrieved stolen vehicles are detected immediately and repeatedly reset to a safe controller state during the short RLS retrieval handoff: AI disabled, driver inputs cleared, transmission in neutral, parking brake applied, starter off and ignition off. Physical vehicle damage is left intact.
 - Retrieved stolen vehicles can be **stripped for parts** from their garage computer menu for a heavily reduced payout, including totaled cars. Strip for Parts has a custom icon.
+- Owned vehicles left in the world can be permanently removed with **Abandon Vehicle (Free)** from the garage computer.
 
 ## Installation
 
@@ -55,6 +56,10 @@ Dealership vehicles can reduce reputation with that dealer's associated organiza
 Retrieve a stolen vehicle to a garage, open the garage computer, select the vehicle and choose **Strip for Parts**. The menu closes while its current condition is checked, then a confirmation popup shows the vehicle name, inventory number and payout. **Cancel** is selected by default. Confirming permanently removes the entire vehicle and pays 5% of its current value by default, with a minimum payout of $1. Normally purchased vehicles cannot be stripped through this add-on.
 
 Cancel an auction listing or wait for a rented/delayed vehicle to become accessible before stripping it. If the condition check fails or times out, stripping is cancelled and a message explains what happened.
+
+## Abandoning a Vehicle
+
+Open a garage computer and select **Abandon Vehicle (Free)**. Choose an owned vehicle that is currently spawned in the world, then confirm the destructive popup. Abandoning charges no fee and pays no money; the vehicle and its inventory record are permanently removed. Stored vehicles must be retrieved before they can be abandoned.
 
 ## Changing a Stolen Vehicle Identity
 

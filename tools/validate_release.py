@@ -40,8 +40,6 @@ with Image.open(FILES[2]) as icon:
     assert icon.size == (96, 96) and icon.mode == "RGB"
 for name in FILES:
     assert Path(name).is_file() and "_archived" not in name
-    if name.endswith((".lua", ".js", ".md", ".json")):
-        assert "abandon" not in Path(name).read_text(encoding="utf-8").lower()
 for name in FILES[-1:]:
     assert ET.parse(name).getroot().tag == "{http://www.w3.org/2000/svg}svg"
 assert f"-- Version {version}." in Path(FILES[1]).read_text(encoding="utf-8")
