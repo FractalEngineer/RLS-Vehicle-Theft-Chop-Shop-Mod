@@ -1,4 +1,4 @@
-## RLS Career Carjacking 0.3.0
+## RLS Career Carjacking 0.4.0
 
 ### Highlights
 
@@ -14,5 +14,6 @@
 
 ### Compatibility
 
-- Targets RLS Career Overhaul 2.7.1.
+- Targets **RLS Career Overhaul 2.8.0**.
+- Targets **BeamNG.drive 0.40.3**.
 - BeamNG runtime regression testing remains recommended after installation.
