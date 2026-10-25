@@ -2,27 +2,96 @@
 
 ## Status
 
-**Current working build: v0.3.1, targeting BeamNG.drive 0.40.3 and RLS Career Overhaul 2.8.0. Runtime testing is pending.**
+**Current release: v0.4.0, targeting BeamNG.drive 0.40.3 and RLS Career Overhaul 2.8.0. The user confirmed the latest build ("perfect") and explicitly authorized committing/pushing all changes and publishing 0.4.0. Automated validation passes; do not claim unreported portions of the full runtime matrix were exercised.**
 
-**Pending:** validate the RLS 2.8.0 namespace migration in BeamNG. Do not publish or tag v0.3.1 until the full runtime matrix passes.
+### v0.4.0 release preparation
 
-RLS 2.8.0 compatibility work:
-- Confirmed the old build never loaded because `career_modules_inventory` was replaced by `overhaul_career_garage_inventory`; `career_career` and `career_saveSystem` also have `overhaul_*` equivalents.
-- Confirmed RLS 2.8 stopped auto-discovering the add-on at `career/modules`; added an explicit deferred `modScript.lua` loader.
-- Removed the renamed RLS modules from static dependencies and added runtime resolution that prefers the 2.8 namespace with a 2.7 fallback.
-- Mapped police, insurance, valuation, inspection, shopping, test-drive, payment, reputation, player-attribute and speed-trap modules to their 2.8 namespaces.
-- Added `onOverhaul*` inventory, part-condition, repair, computer-menu, activation and active-state hook aliases.
-- Joined `overhaul_shell_patches` for the Enter/Exit wrapper so RLS 2.8 realistic walking entry remains in the wrapper chain.
-- Removed every direct non-zero `setPursuitMode` call from add-on update callbacks. The add-on now seeds the suspect role and pursuit score through RLS's native pursuit data, then lets RLS start and escalate the chase.
-- Re-audited the add-on against BeamNG.drive 0.40.3 `gameplay_traffic` and `core_vehicleActivePooling`.
-- Corrected the traffic pool name from the obsolete `traffic` lookup to 0.40's `autoTraffic` pool.
-- Removed the redundant `_updateFlag` write after `removeTraffic`; native 0.40 already removes the vehicle from the active pool and triggers an active-count update.
-- Removed the legacy manual police fallback spawner entirely. When stealing the last police unit, the add-on requests and claims one marked police reserve through BeamNG's native `ensureReservedVehicles` / `useReservedVehicle` provider API.
-- Police pursuit startup now uses RLS 2.8's native `setupPursuitGameplay` with deferred auto-start disabled, then starts the selected level explicitly after the responder is active. This avoids the deferred suspect-tick re-entry that caused stack overflows.
-- Ambient police provider now filters `unmarked`/`undercover` configs, uses marked patrol fallbacks if its sample contains none, and keeps one marked reserve available for the theft response.
-- Native reserve settle time is processed every frame instead of through the once-per-second maximum-heat scan.
-- Police responder selection now requires an active object and an active traffic record. Failed native setup/start calls log a bounded Lua traceback to identify the remaining RLS JSON serialization recursion.
-- Added **Abandon Vehicle (Free)** to the garage computer. It opens RLS's vehicle picker and permanently removes an owned, currently spawned vehicle after a destructive confirmation, with no fee and no payout.
+- Promote the user-confirmed 0.3.1 test build to 0.4.0; gameplay logic is unchanged during release preparation.
+- Put `restoreOnFootPursuitHandoff = true` first in `cfg`, first in the README configuration table, and describe the new pursuit, police restoration and Abandon features at the top of the README.
+- Copy the previous published v0.3.0 release body verbatim at the user's explicit request, including its historical headings and compatibility text. README/metadata describe current compatibility.
+- Commit all current repository changes, including the user's `.commandcode/taste/taste.md`, and publish the exact seven-file 0.4.0 package through the existing GitHub release workflow. Local research, tests and preferences are excluded from the release ZIP.
+- Earlier instructions below to retain 0.3.1 during testing are historical and superseded by this release request.
+
+### On-foot pursuit and police removal lifecycle (2026-10-25)
+
+The user added `restoreOnFootPursuitHandoff = true`; it remains enabled by default. The earlier vehicle-chase startup function is preserved unchanged. Version remains 0.3.1 until release.
+
+Confirmed source failures:
+
+- BeamNG 0.40 `insertTraffic` constructs a native person record but rejects it at its `isVehicle` gate. The previous handoff's insertion therefore never created a walker target. It also lost pending theft alerts/reserves when the source car disappeared.
+- Native RLS can run its switch handler before the add-on. That clears old responders and queues a `pursuitChange` with no responder filter. The add-on now caches the original responders through `onPursuitModeUpdate` and replaces only that deferred retarget when necessary.
+- RLS can clear an officer's target/flags while retaining `targetPursuitMode`. A stale mode without a target/busy flag must not mark an idle officer committed to another chase.
+- Returned native reserves can retain disabled `pursuitEnd`/reset state. Claims now clear that native action before activation and exclude reserves still chasing another live target. Target deletion also releases the add-on's reserve and clears its stale target.
+- Police theft previously skipped the exact traffic-entry replacement debt. When the stolen police car was abandoned, that native police slot was permanently lost.
+
+Implementation:
+
+- Register one native `gameplay/traffic/vehicle` person record for the pursued player, then pass it through native traffic registration. Preserve `isPerson=true`, `isVehicle=false`, non-AI state, and native update/removal lists. No parallel traffic manager or persistent police wrapper.
+- Carry pursuit data and only the original responders between car, walker and next car. Clear inherited arrest/stuck timers at the transfer. Do not emit a new pursuit start or evade reward. Preserve native re-entry autoArrest behavior.
+- Move pending alert/reserve targets synchronously during the switch, independent of the stolen inventory record, so immediately abandoning/deleting the source car cannot strand the on-foot response. A bounded retry covers incomplete player-object registration.
+- Stolen police traffic now uses the same exact one-entry restoration debt as civilian traffic, only after its original object leaves the active world, in the same native pool/model/config. Never top-level spawnTraffic or a custom population catalogue.
+
+Validation loads actual installed BeamNG traffic insertion, vehicle class, update-list registration, native position update, and RLS service/role methods. It verifies both switch-hook order cases, a moving walker, preservation of an unrelated chase, disabled reserve reuse across multiple cycles, deleted-target cleanup, and the actual add-on theft -> confirmed Abandon -> exactly one police traffic pool replacement transaction. Unit tests also cover bailing out before the reserve is ready, deleting the source, and continuing the response without its inventory binding.
+
+In-game checks still required after the updated ZIP and a full restart:
+
+1. Steal a police car, exit and run away: officers follow the player; the stopped car cannot complete the arrest.
+2. Enter another car: the same chase continues with its score/timers, without stealing officers from an unrelated pursuit.
+3. Steal and immediately exit/abandon before the responder is ready: the responder still pursues the walker.
+4. Steal/abandon police cars repeatedly: exactly the removed police entry returns to native traffic, one fallback is reused rather than accumulating, and another police theft still dispatches a responder.
+5. Verify normal evade/reward and unchanged Abandon confirmation/menu behavior. Opting out with `restoreOnFootPursuitHandoff = false` must retain native RLS behavior.
+
+### Police overflow diagnosis (2026-10-25)
+
+The current `beamng.log` records successful spawning/claiming of reserve 82564, followed by failure in native pursuit startup and repeated maximum-heat retries. The stack sometimes exhausts inside `utils.lua` JSON encoding, but the cause is synchronous role-change recursion, not a cyclic JSON data payload or reserve activation delay.
+
+Installed RLS 2.8.0 source proves this sequence:
+
+1. `integration/services/police.lua:setPursuitMode` changes the suspect action to `fleePolice`, then emits `onPursuitAction('start')` **before** writing `pursuit.mode`.
+2. Career enforcement/tasklist callbacks call `career/police/playerDriving.lua:getPlayerIsCop` during that event. With mode still zero, it calls `setRole` using the inventory's `standard` role.
+3. `trafficVehicle:setRole` invokes the old suspect's `onRoleEnded` before replacing the role.
+4. BeamNG's native suspect `onRoleEnded` sees `flags.flee` and calls `evadeVehicle`.
+5. The evade event calls `getPlayerIsCop` again, still with the old role and mode zero. This repeats until stack exhaustion. Delaying reserve activation does not change this ordering.
+
+The new integration test loads the installed RLS service, career cop-status query, traffic role setter, marked responder role, policy registry, and BeamNG base/suspect roles. It first reproduces the recursive start/evade sequence with the unprotected native call, then verifies the add-on's protected startup, responder chase assignment, existing-chase preservation, normal evade, and cleanup after an injected error. Engine objects and event dispatch are mocked; this is not an in-game test.
+
+### Abandon visibility correction (2026-10-25)
+
+The user reports police chases are fixed and explicitly requests no police changes. The Lua file is byte-for-byte identical to the installed working build (SHA256 `c81ef4ed071429133203c667c838727044a3437f2a2552dcbddcf7651389aecb`).
+
+Abandon was absent because BeamNG 0.40's `bngPopoverMenu.vue` uses `defineOptions({ inheritAttrs: false })`. The `.veh-menu` class passed by RLS's `VehicleList.vue` therefore never reaches the DOM. The decorator now finds the emitted `.bng-popover-menu` element and retains its selected-inventory-component and Lua eligibility checks. A regression fixture using the actual native class reproduces the old missing action and passes after the selector correction; the test optionally reads the selector directly from the installed BeamNG Vue file.
+
+Only the UI JavaScript changes inside the updated 0.3.1 ZIP. No police, Lua, version, or removal-transaction changes. Abandon still requires an owned live vehicle without a garage assignment, outside the garage, and destructive confirmation. In-game menu verification remains pending.
+
+### Current v0.3.1 test-build changes
+
+- Use RLS's vehicle-policy `roleLocked` domain only during the synchronous pursuit-start call, only for the selected vehicle's fleeing suspect role while mode is still zero. Always withdraw the policy afterward, including on error. No global police or GUI wrappers.
+- Remove `setupPursuitGameplay` from theft startup: the player is already registered in traffic; that helper recreates roles and resets existing pursuits. Call native `setPursuitMode` with selected responders and preserve a higher existing heat level.
+- Activate an idle existing native pool unit before requesting a fallback; exclude units busy with another pursuit.
+- Replace the add-on's override of the ambient `police` provider with its own zero-population native provider, `rlsCarjackingPolice`. Request at most one marked reserve on demand, including a valid marked fallback when the native sample is empty. RLS's ambient provider/population is unchanged.
+- Keep the reserve claimed while it pursues and return it through the native API on completion or cancellation. Do not release ordinary police pool members as reserves.
+- Remove Abandon from the main garage computer and remove its separate picker. Show **Abandon** only in **My Vehicles**, for owned, live vehicles in unassigned **Storage / N/A**, outside the garage. Recheck eligibility, exact vehicle and object binding at confirmation; use native inventory removal with no financial transaction.
+- Button and popup use **Abandon** without financial wording; Cancel remains the default and the confirmation is destructive and single-use.
+- The isolated UI decorator reads `VehicleList`'s `vehSelected` and inventory store from the owning Vue instance, then requests authoritative Lua eligibility. Inspected BeamNG 0.40's shipped renderer exposes `__vueParentComponent`; its SFC compiler uses `inlineTemplate: false`, exposing setup state. This depends on BeamNG's native `.bng-popover-menu` and RLS's setup variable names. No RLS Vue page override.
+- Added optional installed-source integration checks to `tools/validate_release.py` via `--rls-source <RLS lua/ge/extensions>` and `--beamng-source <BeamNG lua>`.
+
+Static validation: LuaJIT loadfile, transaction/identity/retrieval/traffic regression suite, actual-source police integration, JavaScript menu/icon tests, metadata, 96x96 RGB icon and exact seven-entry ZIP integrity. The v0.2.14 baseline tag already exists and was preserved.
+
+Targeted in-game checks after replacing the old add-on ZIP and fully restarting BeamNG:
+
+1. Steal the last police car: maximum heat, one marked responder actually chases, stolen car cannot arrest you, no stack overflow.
+2. Steal a police car during a chase: preserve the pursuit, do not retarget unrelated busy cops.
+3. Evade: verify normal RLS completion/reward and responder return to native traffic.
+4. My Vehicles: Abandon only on an owned, live Storage / N/A vehicle; no main garage tile, assigned-garage action or stored-car action. Cancel/Escape preserve the car; confirm removes it once. Reassignment/retrieval while the popup is open must cancel removal.
+5. Run the full walking/taxi, retrieval, identity/insurance, hotwire and traffic matrix below before publication.
+
+### Previous compatibility work retained
+
+- RLS 2.8 module resolution prefers `overhaul_*`, with legacy 2.7 fallbacks and explicit deferred `modScript.lua` loading.
+- Native `onOverhaul*` hooks and the RLS walking patch chain remain in use.
+- BeamNG 0.40 traffic uses `autoTraffic`; civilian restoration remains exact one-for-one, without top-level spawning during pursuit.
+
+Per user instruction, retain version 0.3.1 throughout testing; increment only for release. The older v0.3.1 notes below are history, not the current diagnosis or implementation.
 
 v0.3.1 issue-tracker work:
 - Re-audited installed RLS 2.7.2 after the latest user update.
@@ -364,7 +433,7 @@ Several speculative reset approaches failed in older builds. v0.2.14 is the know
 Old physical-license-plate-removal detection was intentionally replaced by **Change Vehicle Identity**.
 
 ### Abandon
-**Abandon Vehicle (Free)** is available from the garage computer. It opens the native vehicle picker and can remove an owned vehicle that is currently spawned in the world after a destructive confirmation popup. It charges no fee and pays no proceeds. Stored vehicles are excluded.
+**Abandon** is available only in the My Vehicles context menu for unassigned, live Storage / N/A vehicles outside the garage, behind a destructive confirmation. Stored and garage-assigned vehicles are excluded. Use native removal without a financial transaction.
 
 ---
 

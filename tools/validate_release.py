@@ -13,6 +13,8 @@ import zipfile
 parser = argparse.ArgumentParser()
 parser.add_argument("--lua-deps", type=Path)
 parser.add_argument("--package", action="store_true")
+parser.add_argument("--rls-source", type=Path, help="RLS lua/ge/extensions directory for integration tests")
+parser.add_argument("--beamng-source", type=Path, help="BeamNG lua directory for integration tests")
 args = parser.parse_args()
 if args.lua_deps:
     sys.path.insert(0, str(args.lua_deps))
@@ -51,6 +53,13 @@ calling_script = Path(FILES[4]).read_text(encoding="utf-8")
 assert 'local extensionName = "career_modules_carjacking"' in calling_script
 assert "extensions.load(extensionName)" in calling_script
 runtime.execute("assert(loadfile(...))()", "tests/test_carjacking.lua")
+if args.rls_source or args.beamng_source:
+    assert args.rls_source and args.beamng_source, "Both source roots are required"
+    LuaRuntime().execute(
+        "local f=assert(loadfile(...)); f(select(2,...))",
+        "tests/test_rls_police_integration.lua",
+        args.rls_source.as_posix(), args.beamng_source.as_posix(),
+    )
 print(f"PASS: {runtime.lua_implementation} loadfile, metadata, RGB icon, SVGs, manifest")
 if args.package:
     output = Path("releases") / metadata["filename"]

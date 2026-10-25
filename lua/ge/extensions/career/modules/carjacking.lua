@@ -1,6 +1,6 @@
 -- RLS Career Carjacking
 -- BeamNG.drive + RLS Career Overhaul carjacking extension.
--- Version 0.3.1.
+-- Version 0.4.0.
 
 local M = {}
 
@@ -49,6 +49,12 @@ local function refreshRlsModules()
 end
 
 local cfg = {
+  -- RLS 2.8 keeps an active pursuit attached to the car when the player bails
+  -- out on foot, so an abandoned, stopped car can be arrested while the player
+  -- is far away. Restore the earlier handoff: the pursuit follows the player
+  -- on foot and moves to the next vehicle they enter.
+  restoreOnFootPursuitHandoff = true,
+
   interactDistance = 3.25,
   maxTargetSpeedMps = 12.0,
 
@@ -68,7 +74,6 @@ local cfg = {
   -- Shell traffic cannot become a valid career vehicle: it has placeholder
   -- parts and may be worth only a few hundred dollars even after laundering.
   requireFullDetailTrafficVehicles = true,
-  preferMarkedPoliceTraffic = true,
 
   -- Sale-vehicle hotwiring. The action only appears while the player is
   -- sitting in an inspected-for-sale vehicle outside an active test drive.
@@ -122,8 +127,8 @@ local originalRedLightHandler
 local wrappedRedLightHandler
 local speedTrapInstallRetry = 0
 
--- My Vehicles context-menu injection is performed only while the menu is
--- opening. We never leave guihooks.trigger replaced after that call returns.
+-- My Vehicles adds its scoped context action through the UI mod; Lua owns
+-- eligibility, destructive confirmation and the native removal transaction.
 
 -- Retrieval safety follows the final v0.1 behavior that proved reliable in
 -- game: notice a newly spawned stolen inventory object immediately, then enforce
@@ -144,6 +149,7 @@ local pendingHotwireRelease = {}
 
 local pendingImmediateAlert
 local pendingPoliceReserve
+local policeHandoff = {provider = "rlsCarjackingPolice", responders = {}}
 local carjackArrestGrace = {}
 local pendingPaintRestore
 local pendingInventoryPaintSnapshots = {}
@@ -158,9 +164,9 @@ local originalTrafficSimpleVehicles
 local trafficSimpleVehiclesChanged = false
 
 -- Removing a live AI car from gameplay_traffic also removes it from BeamNG's
--- native pool.  Keep one tiny replacement record for that exact civilian car.
+-- native pool. Keep one tiny replacement record for that exact traffic car.
 -- When the stolen object finally leaves the world (stored/sold/stripped), spawn
--- one vehicle with the same model/config and hand it straight back to the normal
+-- one vehicle with the same model/config, including police, and hand it back to the normal
 -- traffic system.  No random replacement groups, reserve pools or variety logic.
 local trafficReplacementDebts = {}
 local trafficReplacementRetryTimer = 0
@@ -1125,7 +1131,7 @@ local function policeCommittedToOtherPursuit(policeVeh, targetId)
   local role = policeVeh.role
   local pursuitMode = tonumber(role.targetPursuitMode) or 0
   local otherTarget = role.targetId
-  return pursuitMode > 0 and otherTarget ~= nil and otherTarget ~= targetId
+  return otherTarget ~= targetId and ((otherTarget ~= nil and pursuitMode > 0) or (role.flags and role.flags.busy))
 end
 
 local reassertChangedIdentity
@@ -1302,7 +1308,7 @@ local function nearbyPoliceIds(targetObj, radius)
   return result
 end
 
-local function availablePoliceResponders(targetId, limit)
+local function availablePoliceResponders(targetId, limit, includeInactive)
   local result = {}
   local police = getPoliceModule()
   if not police or not police.getPoliceVehicles then return result end
@@ -1311,8 +1317,8 @@ local function availablePoliceResponders(targetId, limit)
   local targetPos = targetObj and targetObj:getPosition() or nil
   local candidates = {}
 
-  -- RLS owns activation, spawning and pooling. We only collect eligible units
-  -- and let setupPursuitGameplay hand them back through its native lifecycle.
+  -- RLS owns police roles and traffic pooling. Select eligible units without
+  -- resetting their roles; native pool activation settles before pursuit startup.
   for policeId, policeVeh in pairs(police.getPoliceVehicles() or {}) do
     if policeId ~= targetId and not policeCommittedToOtherPursuit(policeVeh, targetId) then
       local policeObj = getObjectByID(policeId)
@@ -1320,7 +1326,8 @@ local function availablePoliceResponders(targetId, limit)
       local dormantReserve = policeVeh and policeVeh.reserved and not policeVeh.claimed
       local active = be and be.getObjectActive and be:getObjectActive(policeId)
       local trafficActive = policeVeh and policeVeh.state == "active"
-      if policeObj and active and trafficActive and roleState ~= "disabled" and not dormantReserve then
+      if policeObj and ((active and trafficActive) or (includeInactive and not active and not policeVeh.reserved))
+        and roleState ~= "disabled" and not dormantReserve then
         local distance = math.huge
         if targetPos then
           local ok, measured = pcall(function() return targetPos:distance(policeObj:getPosition()) end)
@@ -1350,9 +1357,27 @@ local function requestNativePoliceReserve(vehId, inventoryId)
 
   pendingPoliceReserve = {
     vehId = vehId,
-    inventoryId = inventoryId
+    inventoryId = inventoryId,
+    followPlayer = cfg.restoreOnFootPursuitHandoff and getObjectByID(vehId)
+      and getObjectByID(vehId).jbeam == "unicycle"
   }
-  pcall(gameplay_traffic.ensureReservedVehicles, "police", 1)
+  -- Wake an existing idle pool member before asking for a new reserve. Native
+  -- activation performs the placement/refresh; wait for its active record.
+  local pool = getNativeTrafficPool()
+  local idleIds = availablePoliceResponders(vehId, 1, true)
+  local idleId = idleIds[1]
+  if idleId and pool and pool.setVeh then
+    local ok, activated = pcall(pool.setVeh, pool, idleId, true)
+    if ok and activated then
+      pendingPoliceReserve.reserveId = idleId
+      pendingPoliceReserve.settleTimer = 0.75
+      return true
+    end
+  end
+  -- Register our zero-population provider here as well: RLS can register its
+  -- own police provider after the initial provider hook has run.
+  if policeHandoff.registerProvider then policeHandoff.registerProvider() end
+  pcall(gameplay_traffic.ensureReservedVehicles, policeHandoff.provider, 1)
   return true
 end
 
@@ -1360,74 +1385,63 @@ local function beginStolenPolicePursuit(police, vehId, responders, label, pursui
   if not police or not vehId or type(responders) ~= "table" or #responders == 0 then return false end
   pursuitLevel = tonumber(pursuitLevel) or cfg.policeCarjackLevel
 
-  -- Seed both roles first, but suppress the suspect role's deferred auto-start.
-  -- RLS's supported integration pattern then starts the selected level in the
-  -- same settled handoff. Letting the deferred auto-start run can re-enter the
-  -- police lifecycle while the newly claimed responder is still settling.
-  if type(police.setupPursuitGameplay) == "function" then
-    local ok, started = xpcall(function()
-      return police.setupPursuitGameplay(vehId, responders, {
-        playerId = vehId,
-        pursuitMode = pursuitLevel,
-        preventAutoStart = true
-      })
-    end, vehicleDisposal.traceLuaError)
-    if not ok then
-      log("W", logTag, string.format("%s: native pursuit setup failed (%s)", label, tostring(started)))
-      return false
-    end
+  local traffic = gameplay_traffic.getTrafficData()
+  local target = traffic[vehId]
+  if not target or type(police.setPursuitMode) ~= "function" then return false end
+  if policeHandoff.starting then return false end
 
-    local traffic = gameplay_traffic and gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
-    local targetTraffic = traffic[vehId]
-    local roleName = targetTraffic and getVehicleRoleName(targetTraffic) or nil
-    if roleName ~= "suspect" then
-      log("W", logTag, string.format("%s: native pursuit role was not seeded (%s)", label, tostring(started)))
-      return false
+  -- RLS 2.8 emits onPursuitAction('start') before writing pursuit.mode.
+  -- getPlayerIsCop() then sees mode 0 and calls setRole(inventoryRole).
+  -- Ending the fleeing suspect role emits 'evade', which calls getPlayerIsCop
+  -- again before setRole has replaced that role: unbounded synchronous recursion.
+  -- Use RLS's policy boundary only for that call, vehicle and fleeing role.
+  -- Initial promotion to suspect and all normal evade/arrest cleanup stay native.
+  local unregister
+  policeHandoff.starting = vehId
+  local ok, err = xpcall(function()
+    if rawget(_G, "overhaul_integration_services_police") then
+      local policy = require("overhaul/lib/vehicles/policy")
+      unregister = policy.register("rlsCarjackingPursuitHandoff", {
+        roleLocked = function(id, context)
+          return id == vehId and context == target and context.role
+            and context.role.name == "suspect" and context.role.flags
+            and context.role.flags.flee and (tonumber(context.pursuit.mode) or 0) == 0
+        end
+      }, "loaded")
     end
-
-    if type(police.setPursuitMode) ~= "function" then
-      log("W", logTag, string.format("%s: native pursuit start API is unavailable", label))
-      return false
-    end
-    local startOk, startErr = xpcall(function()
-      return police.setPursuitMode(pursuitLevel, vehId, responders)
-    end, vehicleDisposal.traceLuaError)
-    if not startOk then
-      log("W", logTag, string.format("%s: native pursuit start failed (%s)", label, tostring(startErr)))
-      return false
-    end
-
-    targetTraffic = (gameplay_traffic.getTrafficData() or {})[vehId]
-    local mode = targetTraffic and targetTraffic.pursuit and tonumber(targetTraffic.pursuit.mode) or 0
-    if mode < 1 then
-      log("W", logTag, string.format("%s: native pursuit did not start (mode=%d)", label, mode))
-      return false
-    end
-    return true
+    -- Vehicles are already registered as traffic. setupPursuitGameplay would
+    -- recreate roles, clear a live pursuit and remove responders from pooling.
+    police.setPursuitMode(math.max(pursuitLevel, tonumber(target.pursuit.mode) or 0), vehId, responders)
+  end, vehicleDisposal.traceLuaError)
+  if unregister then unregister() end
+  policeHandoff.starting = nil
+  if not ok then
+    log("E", logTag, label .. ": native pursuit start failed (" .. tostring(err) .. ")")
+    return false
   end
-
-  -- Legacy RLS has no setup helper and starts a pursuit directly.
-  local ok = pcall(function() police.setPursuitMode(pursuitLevel, vehId, responders) end)
-  if not ok then log("E", logTag, label .. ": legacy pursuit setup failed") end
-  return ok
+  return (tonumber(target.pursuit.mode) or 0) >= pursuitLevel
 end
 
 local function pendingReserveStillValid(pending)
   if not pending or pendingPoliceReserve ~= pending then return false end
   if not getObjectByID(pending.vehId) then return false end
   if be:getPlayerVehicleID(0) ~= pending.vehId then return false end
+  if pending.followPlayer then return true end
   local inventoryId = career_modules_inventory.getInventoryIdFromVehicleId
     and career_modules_inventory.getInventoryIdFromVehicleId(pending.vehId) or nil
   return inventoryId == pending.inventoryId
 end
 
-local function clearPendingPoliceReserve(pending)
+local function clearPendingPoliceReserve(pending, release)
   if pendingPoliceReserve == pending then pendingPoliceReserve = nil end
+  if release and pending.isNative and policeHandoff.reserveId == pending.reserveId then
+    policeHandoff.releaseReserve()
+  end
 end
 
 local function finishPendingReservePursuit(pending, policeId)
   if not pendingReserveStillValid(pending) then
-    clearPendingPoliceReserve(pending)
+    clearPendingPoliceReserve(pending, true)
     return
   end
   local police = getPoliceModule()
@@ -1438,7 +1452,7 @@ local function finishPendingReservePursuit(pending, policeId)
     log("I", logTag, string.format("Native police reserve %s is engaged", tostring(policeId)))
   else
     log("W", logTag, string.format("Native police reserve %s failed to start pursuit", tostring(policeId)))
-    clearPendingPoliceReserve(pending)
+    clearPendingPoliceReserve(pending, true)
   end
 end
 
@@ -1457,25 +1471,50 @@ local function claimPendingPoliceReserve(pending)
     return false
   end
 
-  local ok, claimed = pcall(gameplay_traffic.useReservedVehicle, "police", 1)
+  local ok, claimed = pcall(gameplay_traffic.useReservedVehicle, policeHandoff.provider, 1,
+    function(_, veh)
+      -- A returned reserve may still be in pursuitEnd/cooldown. Clear that
+      -- native controller action before activation, rather than claiming and
+      -- immediately rejecting the same disabled responder every second.
+      if veh.role and (veh.role.state == "disabled" or (veh.role.flags and veh.role.flags.reset)) then
+        veh.role:resetAction()
+      end
+    end,
+    function(_, veh)
+      local targetId = veh.role and veh.role.targetId
+      local target = targetId and (gameplay_traffic.getTrafficData() or {})[targetId]
+      return not target or not target.pursuit or (tonumber(target.pursuit.mode) or 0) <= 0
+    end)
   if not ok or type(claimed) ~= "table" or not claimed[1] then return false end
   pending.reserveId = claimed[1]
+  pending.isNative = true
+  policeHandoff.reserveId = pending.reserveId
+  policeHandoff.targetId = pending.vehId
   log("I", logTag, string.format("Claimed native police reserve %s", tostring(pending.reserveId)))
   waitForReserveAndBegin(pending, pending.reserveId)
   return true
 end
 
 local function onTrafficReservedVehiclesReady(providerName)
-  if providerName ~= "police" then return end
+  if providerName ~= policeHandoff.provider then return end
   local pending = pendingPoliceReserve
   if pending then claimPendingPoliceReserve(pending) end
 end
 
 local function processPendingPoliceReserve(dtReal)
   local pending = pendingPoliceReserve
-  if not pending or not pending.reserveId then return end
+  if not pending then return end
   if not pendingReserveStillValid(pending) then
-    clearPendingPoliceReserve(pending)
+    clearPendingPoliceReserve(pending, true)
+    return
+  end
+  if policeHandoff.walkTransfer then return end
+  if not pending.reserveId then
+    pending.claimTimer = (pending.claimTimer or 0) - dtReal
+    if pending.claimTimer <= 0 then
+      pending.claimTimer = 0.5
+      claimPendingPoliceReserve(pending)
+    end
     return
   end
 
@@ -1485,6 +1524,10 @@ local function processPendingPoliceReserve(dtReal)
   local traffic = gameplay_traffic.getTrafficData and gameplay_traffic.getTrafficData() or {}
   local reserveTraffic = traffic[pending.reserveId]
   local reserveObj = getObjectByID(pending.reserveId)
+  if not reserveObj or policeCommittedToOtherPursuit(reserveTraffic, pending.vehId) then
+    clearPendingPoliceReserve(pending, true)
+    return
+  end
   if reserveTraffic and reserveTraffic.state == "active" and reserveObj and reserveObj:getActive() then
     finishPendingReservePursuit(pending, pending.reserveId)
   else
@@ -1493,7 +1536,7 @@ local function processPendingPoliceReserve(dtReal)
 end
 
 local function filterMarkedPoliceSpecs(group, count)
-  if type(group) ~= "table" or #group == 0 then return nil end
+  if type(group) ~= "table" then group = {} end
   local marked = {}
   for _, spec in ipairs(group) do
     local config = type(spec) == "table" and tostring(spec.config or "") or ""
@@ -1521,31 +1564,70 @@ local function filterMarkedPoliceSpecs(group, count)
 end
 
 local function onTrafficSpecialVehiclesProviders()
-  if not cfg.preferMarkedPoliceTraffic then return end
   local trafficUtils = rawget(_G, "gameplay_traffic_trafficUtils")
   if not gameplay_traffic or type(gameplay_traffic.registerSpecialVehicleProvider) ~= "function"
     or not trafficUtils or type(trafficUtils.createPoliceGroup) ~= "function" then
     return
   end
 
-  -- Replace the generic police provider with the same population budget, but
-  -- prefer marked patrol configurations. Oversampling keeps the requested
-  -- count while avoiding the 50/50 marked/undercover mix of all police configs.
+  -- Do not replace RLS's ambient police provider. This separate native provider
+  -- has no ambient population or standing reserve; it supplies at most one
+  -- marked theft responder on demand, with native claiming/pooling lifecycle.
   gameplay_traffic.registerSpecialVehicleProvider({
-    name = "police",
+    name = policeHandoff.provider,
     priority = 10,
     minTotalAmount = 0,
-    reserved = 1,
-    getDesiredCount = function(totalAmount, options)
-      if not options.police then return 0 end
-      return math.ceil(totalAmount * 0.05)
-    end,
+    getDesiredCount = function() return 0 end,
     buildGroup = function(count)
       local sampleCount = math.max(count * 3, count + 2)
       local group = trafficUtils.createPoliceGroup(sampleCount)
       return filterMarkedPoliceSpecs(group, count)
     end
   })
+end
+policeHandoff.registerProvider = onTrafficSpecialVehiclesProviders
+
+policeHandoff.releaseReserve = function(resetTarget)
+  local id = policeHandoff.reserveId
+  if resetTarget and id and gameplay_traffic and gameplay_traffic.getTrafficData then
+    local veh = (gameplay_traffic.getTrafficData() or {})[id]
+    if veh and veh.role and veh.role.targetId == policeHandoff.targetId and veh.role.resetAction then
+      veh.role:resetAction()
+    end
+  end
+  policeHandoff.reserveId, policeHandoff.targetId = nil, nil
+  if id and gameplay_traffic and gameplay_traffic.returnReservedVehicle then
+    pcall(gameplay_traffic.returnReservedVehicle, {id})
+  end
+end
+
+local function onPursuitAction(vehId, action)
+  if action == "evade" or action == "arrest" or action == "reset" or action == "release" then
+    policeHandoff.responders[vehId] = nil
+  end
+  if policeHandoff.walkTransfer and policeHandoff.walkTransfer.oldId == vehId
+    and (action == "evade" or action == "arrest" or action == "reset" or action == "release") then
+    policeHandoff.walkTransfer = nil
+  end
+  if vehId == policeHandoff.targetId
+    and (action == "evade" or action == "arrest" or action == "reset" or action == "release") then
+    policeHandoff.releaseReserve()
+  end
+end
+
+policeHandoff.captureResponders = function(vehId)
+  local ids = {}
+  local police = getPoliceModule()
+  for id, veh in pairs(police and police.getPoliceVehicles and police.getPoliceVehicles() or {}) do
+    if veh.role and veh.role.targetId == vehId then ids[#ids + 1] = id end
+  end
+  return ids
+end
+
+policeHandoff.onModeUpdate = function(vehId, info)
+  if cfg.restoreOnFootPursuitHandoff and info and (tonumber(info.mode) or 0) > 0 then
+    policeHandoff.responders[vehId] = policeHandoff.captureResponders(vehId)
+  end
 end
 
 local function scheduleImmediateAlert(vehId, inventoryId, maximumHeat)
@@ -1604,9 +1686,9 @@ local function completeCarjack(vehId, wasPoliceVehicle)
     return false
   end
 
-  if not wasPoliceVehicle then
-    markTrafficReplacementDebt(vehId, snapshot, obj)
-  end
+  -- Police traffic also loses its native pool slot during theft. Restore that
+  -- exact slot when the stolen object leaves the world, just like civilians.
+  markTrafficReplacementDebt(vehId, snapshot, obj)
 
   local vehicle = getInventoryVehicle(inventoryId)
   if not vehicle then return false end
@@ -2232,7 +2314,7 @@ local function processMaximumHeat(dtReal)
 
   local pending = pendingPoliceReserve
   if pending and not pendingReserveStillValid(pending) then
-    clearPendingPoliceReserve(pending)
+    clearPendingPoliceReserve(pending, true)
     pending = nil
   end
   if pending then
@@ -2866,12 +2948,24 @@ local function stripVehicleForParts(inventoryId)
 end
 
 vehicleDisposal.getTarget = function(inventoryId)
+  if not isCareerActive() then return nil, "Career is not active." end
   local vehicle = inventoryId and getInventoryVehicle(inventoryId) or nil
   if not vehicle or vehicle.owned ~= true then
     return nil, "Only owned vehicles can be abandoned."
   end
   if vehicle.timeToAccess then
     return nil, "This vehicle is temporarily unavailable."
+  end
+  -- My Vehicles groups unassigned cars under Storage with capacity N/A.
+  -- A garage assignment is authoritative even if its object is still live.
+  if vehicle.location ~= nil and vehicle.location ~= "" then
+    return nil, "Only vehicles left outside garage storage can be abandoned."
+  end
+  if career_modules_inventory.getInventoryIdsInClosestGarage then
+    local ids = career_modules_inventory.getInventoryIdsInClosestGarage() or {}
+    for _, id in ipairs(ids) do
+      if id == inventoryId then return nil, "Vehicles in a garage cannot be abandoned." end
+    end
   end
   local listedForAuction = career_modules_inventory.isVehicleListedForAuction
     and career_modules_inventory.isVehicleListedForAuction(inventoryId) or false
@@ -2886,14 +2980,6 @@ vehicleDisposal.getTarget = function(inventoryId)
     return nil, "Only vehicles currently left in the world can be abandoned."
   end
   return vehicle, vehId
-end
-
-vehicleDisposal.hasAbandonableVehicle = function()
-  local vehicles = career_modules_inventory.getVehicles and career_modules_inventory.getVehicles() or {}
-  for inventoryId, vehicle in pairs(vehicles) do
-    if vehicle and vehicle.owned == true and vehicleDisposal.getTarget(inventoryId) then return true end
-  end
-  return false
 end
 
 vehicleDisposal.resolveConfirmation = function(inventoryId, token, confirmed)
@@ -2928,9 +3014,8 @@ vehicleDisposal.abandon = function(inventoryId)
 
   request.confirm = function()
     if getInventoryVehicle(inventoryId) ~= request.vehicle then return false end
-    local liveVehId = career_modules_inventory.getVehicleIdFromInventoryId
-      and career_modules_inventory.getVehicleIdFromInventoryId(inventoryId) or nil
-    if liveVehId ~= request.vehId or not getObjectByID(liveVehId) then
+    local currentVehicle, liveVehId = vehicleDisposal.getTarget(inventoryId)
+    if currentVehicle ~= request.vehicle or liveVehId ~= request.vehId then
       message("Vehicle location changed. Abandon cancelled.", 4)
       return false
     end
@@ -2956,7 +3041,7 @@ vehicleDisposal.abandon = function(inventoryId)
       pcall(career_modules_inventory.sendVehicleUpdatesToUi)
     end
     requestCareerSave(0.1)
-    message("Vehicle abandoned. No fee was paid and no payout was received.", 4)
+    message("Vehicle abandoned.", 4)
     if career_career and career_career.closeAllMenus then
       pcall(function() career_career.closeAllMenus() end)
     end
@@ -2968,11 +3053,11 @@ vehicleDisposal.abandon = function(inventoryId)
   local callback = string.format("career_modules_carjacking.resolveAbandonConfirmation(%q, %d, ", tostring(inventoryId), request.token)
   local ok = pcall(function()
     guihooks.trigger("showConfirmationDialog", {
-      title = "Abandon Vehicle?",
-      text = string.format("Permanently abandon <strong v-pre>%s</strong> (vehicle #%s)?<br>There is no fee and no payout. This removes the vehicle from your inventory and cannot be undone.", name, tostring(inventoryId)),
+      title = "Abandon?",
+      text = string.format("Permanently abandon <strong v-pre>%s</strong> (vehicle #%s)?<br>This removes the vehicle from your inventory and cannot be undone.", name, tostring(inventoryId)),
       buttons = {
         {label = "Cancel", luaCallback = callback .. "false)", isCancel = true, default = true},
-        {label = "Abandon Vehicle", luaCallback = callback .. "true)", isConfirm = true, isDestructive = true}
+        {label = "Abandon", luaCallback = callback .. "true)", isConfirm = true, isDestructive = true}
       }
     })
   end)
@@ -2984,46 +3069,9 @@ vehicleDisposal.abandon = function(inventoryId)
   return true
 end
 
-vehicleDisposal.openPicker = function()
-  if type(career_modules_inventory.openMenu) ~= "function" then
-    message("The RLS vehicle picker is unavailable.", 4)
-    return false
-  end
-  local ok, err = pcall(function()
-    career_modules_inventory.openMenu({
-      {
-        callback = function(inventoryId) vehicleDisposal.abandon(inventoryId) end,
-        buttonText = "Abandon Vehicle (Free)",
-        repairRequired = false
-      }
-    }, "Abandon Vehicle", {
-      repairEnabled = false,
-      sellEnabled = false,
-      favoriteEnabled = false,
-      storingEnabled = false,
-      returnLoanerEnabled = false
-    })
-  end)
-  if not ok then
-    log("E", logTag, "Unable to open the abandon vehicle picker: " .. tostring(err))
-    message("Unable to open the vehicle picker. See the game log for details.", 5)
-    return false
-  end
-  return true
-end
-
 -- Add stolen-vehicle management actions to the garage computer.
 local function onComputerAddFunctions(menuData, computerFunctions)
   if not menuData or not computerFunctions or type(computerFunctions.vehicleSpecific) ~= "table" then return end
-
-  if vehicleDisposal.hasAbandonableVehicle() then
-    computerFunctions.general.rlsCarjackingAbandonVehicle = {
-      id = "rlsCarjackingAbandonVehicle",
-      label = "Abandon Vehicle (Free)",
-      callback = vehicleDisposal.openPicker,
-      order = 96
-    }
-  end
 
   for _, vehicleData in ipairs(menuData.vehiclesInGarage or {}) do
     local inventoryId = vehicleData.inventoryId
@@ -3367,6 +3415,7 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   processPendingIdentityChanges(dtReal)
 
   -- Run the handoff guard before assigning/maintaining police pursuit.
+  if policeHandoff.processWalkTransfer then policeHandoff.processWalkTransfer(dtReal) end
   processCarjackArrestGrace(dtReal)
   processImmediateAlert(dtReal)
   processPendingPoliceReserve(dtReal)
@@ -3389,9 +3438,179 @@ local function onUpdate(dtReal, dtSim, dtRaw)
   end
 end
 
+policeHandoff.ensurePlayerTraffic = function(vehId)
+  local traffic = gameplay_traffic.getTrafficData() or {}
+  if traffic[vehId] then return traffic[vehId] end
+  local obj = getObjectByID(vehId)
+  if not obj then return nil end
+
+  if obj.jbeam == "unicycle" then
+    -- 0.40 insertTraffic constructs a native person record but rejects it at
+    -- the isVehicle gate. Register that same native class as a non-AI player
+    -- target first; insertTraffic then owns its update list and removal hooks.
+    -- Keep isPerson=true/isVehicle=false: native pursuit uses horizontal speed
+    -- and skips road offenses for the walking avatar.
+    local ok, result = pcall(function()
+      local nativeVehicle = require("gameplay/traffic/vehicle")
+      local person = nativeVehicle({id = vehId})
+      if not person then return nil end
+      person:postInit()
+      person.isAi = false
+      person.enableRespawn = false
+      person.enableAutoPooling = false
+      person.rlsCarjackingWalker = true
+      traffic[vehId] = person
+      gameplay_traffic.insertTraffic(vehId, true, true)
+      return person
+    end)
+    if not ok then
+      if traffic[vehId] then gameplay_traffic.removeTraffic(vehId) end
+      return nil
+    end
+    return result
+  end
+
+  gameplay_traffic.insertTraffic(vehId, true, true)
+  return traffic[vehId]
+end
+
+local function transferPursuitOnFoot(request)
+  local traffic = gameplay_traffic.getTrafficData() or {}
+  local oldTraffic = traffic[request.oldId]
+  local newTraffic = policeHandoff.ensurePlayerTraffic(request.newId)
+  if not newTraffic then return false end
+
+  -- RLS may already have transferred the chase if its switch hook ran first.
+  -- Do not reset it or duplicate the native re-entry/arrest callback.
+  local oldMode = oldTraffic and oldTraffic.pursuit and tonumber(oldTraffic.pursuit.mode) or 0
+  local newMode = newTraffic.pursuit and tonumber(newTraffic.pursuit.mode) or 0
+  if oldMode <= 0 and newMode > 0 then
+    -- RLS cleared the old target before this hook. Replace only its deferred
+    -- pursuitChange (which otherwise retargets every officer) with the cached
+    -- original responder set. Leave native re-entry autoArrest untouched.
+    newTraffic.queuedFuncs.pursuitChange = nil
+    local police = getPoliceModule()
+    local ids = {}
+    local registry = police.getPoliceVehicles and police.getPoliceVehicles() or {}
+    for _, id in ipairs(request.responders) do
+      if registry[id] and not policeCommittedToOtherPursuit(registry[id], request.newId) then ids[#ids + 1] = id end
+    end
+    police.setPursuitMode(newMode, request.newId, ids)
+    return true
+  end
+  local pursuit = oldMode > 0 and oldTraffic.pursuit or request.pursuit
+  if not pursuit or (tonumber(pursuit.mode) or 0) <= 0 then
+    -- A theft alert/reserve was pending when the player bailed out. Its target
+    -- was moved by the switch hook; normal alert startup will run on the walker.
+    return true
+  end
+
+  local police = getPoliceModule()
+  if not police or type(police.setPursuitMode) ~= "function" then return false end
+  local responders = {}
+  local registry = police.getPoliceVehicles and police.getPoliceVehicles() or {}
+  for _, id in ipairs(request.responders) do
+    local veh = registry[id]
+    if veh and (veh.role.targetId == request.oldId or not policeCommittedToOtherPursuit(veh, request.newId)) then
+      responders[#responders + 1] = id
+    end
+  end
+  local snapshot = deepcopy(pursuit)
+  if getVehicleRoleName(newTraffic) ~= "suspect" then newTraffic:setRole("suspect") end
+  newTraffic.ignorePolice = false
+  newTraffic.ignorePursuit = false
+  newTraffic.pursuit = snapshot
+  if snapshot.timers then
+    snapshot.timers.arrest = 0
+    snapshot.timers.arrestValue = 0
+    snapshot.timers.stuck = 0
+  end
+  if oldTraffic and oldMode > 0 then police.setPursuitMode(0, request.oldId, {}) end
+  -- A continuation keeps its score/timers and emits no new start/evade reward.
+  -- Only officers pursuing the old target are redirected.
+  police.setPursuitMode(snapshot.mode, request.newId, responders)
+  if request.inVehicle and snapshot.policeVisible and police.arrestVehicle then
+    newTraffic.queuedFuncs.autoArrest = {
+      timer = 0.2, func = police.arrestVehicle,
+      args = {request.newId, gameplay_traffic.showMessages}
+    }
+  end
+  return true
+end
+
+policeHandoff.processWalkTransfer = function(dtReal)
+  local request = policeHandoff.walkTransfer
+  if not request then return end
+  request.ttl = request.ttl - dtReal
+  if not cfg.restoreOnFootPursuitHandoff or not isCareerActive() or request.ttl <= 0 then
+    policeHandoff.walkTransfer = nil
+    return
+  end
+  if be:getPlayerVehicleID(0) ~= request.newId then return end
+  local ok, transferred = xpcall(function() return transferPursuitOnFoot(request) end, vehicleDisposal.traceLuaError)
+  if not ok then
+    log("E", logTag, "On-foot pursuit transfer failed: " .. tostring(transferred))
+    policeHandoff.walkTransfer = nil
+  elseif transferred then
+    policeHandoff.walkTransfer = nil
+    policeHandoff.responders[request.oldId] = nil
+    local oldTraffic = (gameplay_traffic.getTrafficData() or {})[request.oldId]
+    if oldTraffic and oldTraffic.rlsCarjackingWalker then
+      gameplay_traffic.removeTraffic(request.oldId)
+    end
+  end
+end
+
+local function onVehicleSwitched(oldId, newId, player)
+  if not cfg.restoreOnFootPursuitHandoff or not refreshRlsModules() or not isCareerActive() then return end
+  if player ~= nil and player ~= 0 then return end
+  oldId, newId = tonumber(oldId) or oldId, tonumber(newId) or newId
+  if not oldId or not newId or oldId == newId then return end
+  if not gameplay_traffic or type(gameplay_traffic.getTrafficData) ~= "function" then return end
+  local newObj, oldObj = getObjectByID(newId), getObjectByID(oldId)
+  if not newObj or not newObj:isPlayerControlled() then return end
+  local inVehicle = oldObj and oldObj.jbeam == "unicycle"
+  if not inVehicle and newObj.jbeam ~= "unicycle" then return end
+  local traffic = gameplay_traffic.getTrafficData() or {}
+  local oldPursuit = traffic[oldId] and traffic[oldId].pursuit
+  local newPursuit = traffic[newId] and traffic[newId].pursuit
+  local pending = pendingPoliceReserve and pendingPoliceReserve.vehId == oldId
+  local alert = pendingImmediateAlert and pendingImmediateAlert.vehId == oldId
+  local previous = policeHandoff.walkTransfer
+  if not ((oldPursuit and (tonumber(oldPursuit.mode) or 0) > 0)
+    or (newPursuit and (tonumber(newPursuit.mode) or 0) > 0) or pending or alert
+    or (previous and previous.newId == oldId)) then return end
+
+  -- Move our ownership markers synchronously. Inventory removal can delete the
+  -- old car before the next update, and must not cancel the player's responder.
+  if policeHandoff.targetId == oldId then policeHandoff.targetId = newId end
+  if pending then
+    pendingPoliceReserve.vehId = newId
+    pendingPoliceReserve.followPlayer = true
+  end
+  if alert then pendingImmediateAlert.vehId = newId end
+  local responders = policeHandoff.captureResponders(oldId)
+  if #responders == 0 then responders = policeHandoff.responders[oldId] or (previous and previous.responders) or {} end
+  policeHandoff.walkTransfer = {
+    oldId = previous and previous.oldId or oldId, newId = newId,
+    inVehicle = inVehicle == true, ttl = 2,
+    pursuit = oldPursuit and (tonumber(oldPursuit.mode) or 0) > 0 and deepcopy(oldPursuit) or (previous and previous.pursuit),
+    responders = responders
+  }
+  policeHandoff.processWalkTransfer(0)
+end
+
 local function onVehicleDestroyed(vehId)
   vehId = tonumber(vehId) or vehId
   if not vehId then return end
+  policeHandoff.responders[vehId] = nil
+  if policeHandoff.targetId == vehId then policeHandoff.releaseReserve(true) end
+  if pendingPoliceReserve and pendingPoliceReserve.vehId == vehId then
+    clearPendingPoliceReserve(pendingPoliceReserve, true)
+  end
+  if policeHandoff.reserveId == vehId then
+    policeHandoff.reserveId, policeHandoff.targetId = nil, nil
+  end
   if trafficReplacementDebts[vehId] then
     trafficReplacementDebts[vehId].ready = true
     trafficReplacementRetryTimer = 0
@@ -3534,6 +3753,10 @@ end
 
 local function onOverhaulActive(active)
   if active == false then
+    policeHandoff.responders = {}
+    policeHandoff.walkTransfer = nil
+    pendingPoliceReserve = nil
+    policeHandoff.releaseReserve()
     restoreFullDetailTrafficVehicleSetting()
     restoreWalkingModeWrapper()
     rlsIntegrationInitialized = false
@@ -3545,6 +3768,9 @@ end
 local function onExtensionUnloaded()
   rlsIntegrationInitialized = false
   pendingPoliceReserve = nil
+  policeHandoff.walkTransfer = nil
+  policeHandoff.responders = {}
+  policeHandoff.releaseReserve()
   pendingHotwire = nil
   pendingHotwireRelease = {}
   quickAccessInitialized = false
@@ -3568,9 +3794,15 @@ M.changeVehicleVin = changeVehicleIdentity -- 0.2.0 compatibility alias
 M.stripVehicleForParts = stripVehicleForParts
 M.resolveStripConfirmation = resolveStripConfirmation
 M.resolveAbandonConfirmation = vehicleDisposal.resolveConfirmation
+M.abandonVehicle = vehicleDisposal.abandon
+M.canAbandonVehicle = function(inventoryId)
+  if not refreshRlsModules() or not isCareerActive() then return false end
+  return vehicleDisposal.getTarget(tonumber(inventoryId) or inventoryId) ~= nil
+end
 M.hotwireSaleVehicle = function() return completeSaleVehicleHotwire(getHotwireCandidate()) end
 M.getConfig = function() return cfg end
 
+M.onVehicleSwitched = onVehicleSwitched
 M.onVehicleDestroyed = onVehicleDestroyed
 M.onVehicleActiveChanged = onVehicleActiveChanged
 M.onVehicleAdded = onVehicleAdded
@@ -3595,6 +3827,8 @@ M.onOverhaulRepairInGarage = onRepairInGarage
 M.onOverhaulComputerAddFunctions = onComputerAddFunctions
 M.onTrafficSpecialVehiclesProviders = onTrafficSpecialVehiclesProviders
 M.onTrafficReservedVehiclesReady = onTrafficReservedVehiclesReady
+M.onPursuitAction = onPursuitAction
+M.onPursuitModeUpdate = policeHandoff.onModeUpdate
 M.onExtensionUnloaded = onExtensionUnloaded
 
 refreshRlsModules()

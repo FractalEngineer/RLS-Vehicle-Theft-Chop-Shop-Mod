@@ -209,7 +209,7 @@ Automated speed/red-light camera fines remain exempt for stolen vehicles accordi
 
 ### Abandon
 
-**Abandon Vehicle (Free)** removes an owned vehicle that is currently spawned in the world. It must remain behind a destructive confirmation popup, must not charge money, and must not pay a sale or scrap payout. Use RLS's inventory removal API so garage bindings, damage state and other native cleanup run normally. Stored vehicles are not eligible for remote abandonment.
+**Abandon** appears only in the **My Vehicles** context menu for owned, live vehicles in the unassigned **Storage / N/A** group, outside the garage. It must not appear on the main garage computer or for vehicles assigned to a garage. It removes the selected vehicle from inventory. It must remain behind a destructive confirmation popup, must not charge money, and must not pay a sale or scrap payout. Use RLS's inventory removal API so garage bindings, damage state and other native cleanup run normally. Stored vehicles are not eligible for remote abandonment. Use only **Abandon** on the button and confirmation; do not advertise a fee or payout.
 
 ---
 
@@ -352,7 +352,7 @@ Before packaging:
 5. Verify metadata version and ZIP filename match.
 6. Do not invent numeric BeamNG `resource_id` or `resource_version_id`.
 7. Verify no `_archived` filename.
-8. Verify **Abandon Vehicle (Free)** has a confirmation popup, charges no fee and pays no proceeds.
+8. Verify **Abandon** has a confirmation popup, charges no fee and pays no proceeds.
 9. ZIP must contain exactly:
    ```text
    README.md

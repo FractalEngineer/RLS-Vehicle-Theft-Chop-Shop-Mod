@@ -2,20 +2,22 @@
 
 Carjacking add-on for **BeamNG.drive + RLS Career Overhaul**.
 
-Version **0.3.1**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul 2.8.0**.
+Version **0.4.0**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul 2.8.0**.
 
-> **Compatibility status:** adapted to the RLS 2.8.0 `overhaul_*` module and
-> lifecycle namespace. This source remains unpublished pending runtime testing
-> on BeamNG.drive 0.40.3 with RLS 2.8.0.
+## New in 0.4.0
+
+- **On-foot pursuit:** `restoreOnFootPursuitHandoff = true` makes the chase follow you when you leave a pursued vehicle and continue in the next vehicle you enter. This option is enabled by default and is the first setting in `cfg`. Set it to `false` to keep RLS's pursuit attached to your last vehicle.
+- **Police traffic restoration:** storing or abandoning a stolen police traffic car restores exactly its original traffic entry. Native fallback responders can be reused for later thefts.
+- **Abandon:** select an eligible vehicle under **My Vehicles → Storage / N/A**, choose **Abandon**, and confirm the popup. The action is restricted to owned vehicles left in the world without a garage assignment.
 
 ## Features
 
 - Steal live AI traffic using the normal **Enter/Exit Vehicle** control.
 - Vehicles that BeamNG/RLS exposes as normal walking-mode entry targets are never intercepted by carjacking. This keeps called passenger taxis and other legitimate service/scripted vehicles on their native Enter/Exit interaction.
-- Carjacking leaves BeamNG/RLS traffic management in control. When a stolen civilian traffic vehicle later leaves the active world, the mod restores exactly that one removed traffic entry with the same model/configuration. If RLS has rebuilt the traffic pool in the meantime, that new population takes precedence.
+- Carjacking leaves BeamNG/RLS traffic management in control. When a stolen traffic vehicle, including a police vehicle, later leaves the active world, the mod restores exactly that one removed traffic entry with the same model/configuration. If RLS has rebuilt the traffic pool in the meantime, that new population takes precedence.
 - Provider-reserved traffic, including taxis dispatched by BeamNG's native traffic system, is never selected for carjacking and stays under its native lifecycle.
 - Hotwire inspected vehicles for sale from the action wheel outside an active test drive; the vehicle is released and started when the hotwire completes.
-- Police vehicles can be stolen and trigger maximum police heat.
+- Police vehicles can be stolen and trigger maximum police heat. Exiting during a pursuit transfers it to the player on foot, then to the next vehicle entered; this can be disabled in configuration. Abandoning or storing a stolen police traffic vehicle restores its exact native traffic entry.
 - Stolen vehicles keep their configuration, damage, paint and license plate when first stolen.
 - Stolen street traffic receives a model-appropriate year and age-consistent mileage; hotwired dealership vehicles keep the seller's year and mileage.
 - Stolen vehicles cannot be insured until their vehicle identity is changed, and do not receive automated speed-camera or red-light-camera fines.
@@ -27,7 +29,7 @@ Version **0.3.1**, updated for **BeamNG.drive 0.40.3** and **RLS Career Overhaul
 - Hotwiring dealership vehicles applies a configurable dealer reputation penalty.
 - Retrieved stolen vehicles are detected immediately and repeatedly reset to a safe controller state during the short RLS retrieval handoff: AI disabled, driver inputs cleared, transmission in neutral, parking brake applied, starter off and ignition off. Physical vehicle damage is left intact.
 - Retrieved stolen vehicles can be **stripped for parts** from their garage computer menu for a heavily reduced payout, including totaled cars. Strip for Parts has a custom icon.
-- Owned vehicles left in the world can be permanently removed with **Abandon Vehicle (Free)** from the garage computer.
+- Owned vehicles left in the wild appear under **Storage / N/A** in **My Vehicles**. Their context menu offers **Abandon**, with a destructive confirmation popup.
 
 ## Installation
 
@@ -59,7 +61,7 @@ Cancel an auction listing or wait for a rented/delayed vehicle to become accessi
 
 ## Abandoning a Vehicle
 
-Open a garage computer and select **Abandon Vehicle (Free)**. Choose an owned vehicle that is currently spawned in the world, then confirm the destructive popup. Abandoning charges no fee and pays no money; the vehicle and its inventory record are permanently removed. Stored vehicles must be retrieved before they can be abandoned.
+Open **My Vehicles**, select a vehicle in the **Storage / N/A** group, and choose **Abandon**. Confirm the popup to permanently remove that vehicle from your inventory. The action is available only for owned vehicles currently left in the world with no garage assignment, outside the garage. Vehicles stored at or assigned to a garage are excluded.
 
 ## Changing a Stolen Vehicle Identity
 
@@ -79,6 +81,7 @@ After changing a value, save the file and fully restart BeamNG before testing it
 
 | Variable | Default | Description |
 | --- | ---: | --- |
+| `restoreOnFootPursuitHandoff` | `true` | Restores the pre-RLS-2.8 handoff where leaving a pursued vehicle moves the pursuit onto the player on foot and then to the next vehicle entered. Set to `false` to keep RLS 2.8's behavior of leaving the pursuit on the abandoned car. |
 | `interactDistance` | `3.25` | Maximum distance in meters from the player to an eligible traffic vehicle for carjacking. |
 | `maxTargetSpeedMps` | `12.0` | Maximum target vehicle speed in meters per second. `12.0 m/s` is about `43 km/h`. |
 | `immediateAlertRadius` | `220.0` | Radius in meters in which nearby police can immediately respond to a theft, including a hotwired sale vehicle. |
@@ -91,7 +94,6 @@ After changing a value, save the file and fully restart BeamNG before testing it
 | `stolenValueMultiplier` | `0.35` | Multiplier applied to a stolen vehicle's normal market value. `0.35` means 35% of normal value. |
 | `stripPartsMultiplier` | `0.05` | Fraction of current vehicle value paid when using **Strip for Parts**. `0.05` means a 5% payout. |
 | `allowPoliceVehicles` | `true` | Set to `false` to prevent police vehicles from being stolen. |
-| `preferMarkedPoliceTraffic` | `true` | Prefer marked patrol configurations for ambient police traffic instead of RLS's mixed marked/undercover selection. |
 | `requireFullDetailTrafficVehicles` | `true` | Keeps simplified traffic shells out of career inventory and disables BeamNG's simplified-traffic option while the add-on is active. Set to `false` to accept shell vehicles with placeholder parts and values. |
 | `allowSaleVehicleHotwire` | `true` | Enables the **Hotwire** action for inspected vehicles that are for sale. |
 | `allowPrivateSellerHotwire` | `true` | Allows vehicles from private marketplace sellers to be hotwired. |
@@ -99,4 +101,4 @@ After changing a value, save the file and fully restart BeamNG before testing it
 | `identityChangeCostMultiplier` | `0.35` | Cost of changing a stolen vehicle's identity as a fraction of its current market value. `0.35` means 35%. |
 | `identityChangeDurationSeconds` | `0` | Time in real-world seconds for **Change Vehicle Identity** to complete after payment. `0` makes it instant. |
 | `carjackArrestGraceSeconds` | `4.0` | Short grace period in seconds after taking control of a stolen vehicle before an existing nearby pursuit can complete an arrest. |
-| `desiredPoliceResponders` | `1` | Maximum number of existing police units passed to RLS when setting up a stolen-police pursuit. If none remain, one marked police reserve is requested through BeamNG's native provider API. |
+| `desiredPoliceResponders` | `1` | Maximum number of existing police units assigned to a stolen-police pursuit. Idle native pool units are activated first; when none are available, one marked responder is requested through a separate native provider. RLS controls the pursuit and ambient police population. |

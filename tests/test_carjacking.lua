@@ -34,7 +34,7 @@ local function fixture(value)
   ui_message = function(msg) table.insert(state.messages, msg) end
   log = function() end
   be = {getPlayerVehicleID = function() return state.player end}
-  career_career = {closeAllMenus = function() state.closed = true end}
+  career_career = {isActive = function() return true end, closeAllMenus = function() state.closed = true end}
   career_modules_inventory = {
     getVehicles = function() return state.vehicles end,
     getVehicleIdFromInventoryId = function(id) return state.ids[id] end,
@@ -109,23 +109,38 @@ s.vehicles[7].rlsCarjack = nil
 assert(not s.mod.stripVehicleForParts(7) and not s.callback, "ordinary owned vehicles cannot be stripped")
 s = fixture(100)
 s.vehicles[7].owned = true
-local disposal = upvalue(s.mod.onComputerAddFunctions, "vehicleDisposal")
-local abandonVehicle = disposal.abandon
+local abandonVehicle = s.mod.abandonVehicle
 assert(abandonVehicle(7) and s.dialog, "abandon must use a confirmation popup")
 assert(s.dialog.buttons[1].default and s.dialog.buttons[1].isCancel)
 assert(s.dialog.buttons[2].isConfirm and s.dialog.buttons[2].isDestructive)
 assert(not s.dialog.text:find("$", 1, true), "abandon must be free")
+assert(s.dialog.buttons[2].label == "Abandon" and not s.dialog.text:find("fee", 1, true))
 s.confirm(true)
 assert(s.removed == 1 and s.sales == 0 and s.paid == 0, "abandon must remove without a sale")
 s = fixture(100)
 s.vehicles[7].owned = true
-disposal = upvalue(s.mod.onComputerAddFunctions, "vehicleDisposal")
-abandonVehicle = disposal.abandon
+abandonVehicle = s.mod.abandonVehicle
 assert(abandonVehicle(7))
 s.confirm(false)
 assert(not s.removed, "cancelled abandon must keep the vehicle")
 s.ids[7] = nil
 assert(not abandonVehicle(7), "stored vehicles cannot be abandoned remotely")
+s = fixture(100)
+s.vehicles[7].owned = true
+s.vehicles[7].location = "belascoGarage"
+assert(not s.mod.abandonVehicle(7), "live cars assigned to a garage are excluded")
+s.vehicles[7].location = nil
+assert(s.mod.abandonVehicle(7))
+s.vehicles[7].location = "belascoGarage"
+s.confirm(true)
+assert(not s.removed, "garage assignment must be rechecked at confirmation")
+s = fixture(100)
+s.vehicles[7].owned = true
+career_modules_inventory.getInventoryIdsInClosestGarage = function() return {7} end
+assert(not s.mod.abandonVehicle(7), "unassigned cars physically in the garage are excluded")
+local computerFunctions = {general = {}, vehicleSpecific = {}}
+s.mod.onComputerAddFunctions({vehiclesInGarage = {}}, computerFunctions)
+assert(next(computerFunctions.general) == nil, "Abandon must never add a main computer tile")
 s = fixture(100)
 s.mod.stripVehicleForParts(7)
 s.callback()
@@ -443,16 +458,9 @@ assert(not sourceText:find("spawnPoliceResponder", 1, true),
   "RLS 2.8 must own police spawning instead of the legacy fallback responder")
 assert(not sourceText:find("pool._updateFlag = true", 1, true),
   "removeTraffic already owns active-pool reconciliation")
-assert(sourceText:find("police.setupPursuitGameplay", 1, true),
-  "RLS 2.8 pursuit integration must use the native setup helper")
-assert(sourceText:find("preventAutoStart = true", 1, true),
-  "RLS 2.8 pursuit setup must suppress deferred auto-start")
-assert(sourceText:find("police.setPursuitMode(pursuitLevel, vehId, responders)", 1, true),
-  "RLS 2.8 pursuit setup must start the seeded level explicitly")
-assert(not sourceText:find("pursuit.score = math.max", 1, true),
-  "pursuit score seeding must not trigger RLS's deferred auto-start")
-assert(sourceText:find("reserved = 1", 1, true)
-  and sourceText:find("ensureReservedVehicles", 1, true)
+assert(not sourceText:find("police.setupPursuitGameplay(", 1, true),
+  "starting theft heat must not recreate roles or reset existing pursuit state")
+assert(sourceText:find("ensureReservedVehicles", 1, true)
   and sourceText:find("useReservedVehicle", 1, true),
   "police heat must refill and claim a native reserved police vehicle")
 local nativeTraffic = {
@@ -463,16 +471,19 @@ local nativeTraffic = {
 }
 gameplay_traffic.getTrafficData = function() return nativeTraffic end
 local nativeSetModeCalled = false
+local policyRegistered, policyRemoved
+package.preload['overhaul/lib/vehicles/policy'] = function()
+  return {register = function(owner, domains, lifetime)
+    assert(owner == 'rlsCarjackingPursuitHandoff' and type(domains.roleLocked) == 'function' and lifetime == 'loaded')
+    policyRegistered = true
+    return function() policyRemoved = true end
+  end}
+end
 local nativePolice = {
-  setupPursuitGameplay = function(suspectId, policeIds, options)
-    assert(suspectId == 10 and policeIds[1] == 20 and options.pursuitMode == 3)
-    assert(options.preventAutoStart == true)
-    nativeTraffic[10].role.name = "suspect"
-    return true
-  end,
   setPursuitMode = function(mode, suspectId, policeIds)
     assert(mode == 3 and suspectId == 10 and policeIds[1] == 20)
     nativeSetModeCalled = true
+    nativeTraffic[10].role.name = "suspect"
     nativeTraffic[10].pursuit.mode = mode
   end,
   getPursuitVars = function() return {scoreLevels = {150, 900, 2800}} end,
@@ -482,14 +493,15 @@ local beginNativePursuit = upvalue(upvalue(overhaulMod.onUpdate, "processImmedia
 assert(beginNativePursuit(nativePolice, 10, {20}, "test", 3))
 assert(nativeTraffic[10].role.name == "suspect" and nativeTraffic[10].pursuit.mode == 3)
 assert(nativeSetModeCalled, "native pursuit setup must start the seeded level explicitly")
+assert(policyRegistered and policyRemoved, "RLS role protection must be scoped to native startup")
 local reserveEnsured, reserveUseAttempts = 0, 0
 gameplay_traffic.ensureReservedVehicles = function(provider, count)
-  assert(provider == "police" and count == 1)
+  assert(provider == "rlsCarjackingPolice" and count == 1)
   reserveEnsured = reserveEnsured + 1
   return true
 end
 gameplay_traffic.useReservedVehicle = function(provider, count)
-  assert(provider == "police" and count == 1)
+  assert(provider == "rlsCarjackingPolice" and count == 1)
   reserveUseAttempts = reserveUseAttempts + 1
   return {20}
 end
@@ -501,6 +513,8 @@ be.getPlayerVehicleID = function() return 10 end
 overhaul_career_garage_inventory.getInventoryIdFromVehicleId = function(id) return id == 10 and 7 or nil end
 assert(requestReserve(10, 7) and reserveEnsured == 1)
 overhaulMod.onTrafficReservedVehiclesReady("police")
+assert(reserveUseAttempts == 0, "must not claim RLS's own service reserve")
+overhaulMod.onTrafficReservedVehiclesReady("rlsCarjackingPolice")
 pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
 assert(reserveUseAttempts == 1 and pendingReserve.reserveId == 20 and pendingReserve.settleTimer == 0.75,
   "native police reserve must be claimed after its ready hook and settled before pursuit setup")
@@ -512,8 +526,8 @@ processPendingReserve(0.25)
 pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
 assert(math.abs(pendingReserve.settleTimer - 0.25) < 1e-9,
   "native police reserve settle time must advance every frame")
-assert(sourceText:find('name = "police"', 1, true) and sourceText:find("filterMarkedPoliceSpecs", 1, true),
-  "ambient police provider must prefer marked patrol configs")
+assert(sourceText:find('provider = "rlsCarjackingPolice"', 1, true),
+  "fallback must use its own native provider without replacing ambient police")
 local filterMarked = upvalue(overhaulMod.onTrafficSpecialVehiclesProviders, "filterMarkedPoliceSpecs")
 local markedGroup = filterMarked({
   {model = "fullsize", config = "bcpd"},
@@ -530,5 +544,167 @@ local fallbackGroup = filterMarked({
 assert(#fallbackGroup == 2)
 assert(fallbackGroup[1].config == "bcpd" and fallbackGroup[2].config == "police",
   "marked police fallback must never leak undercover configurations")
+assert(#filterMarked({}, 1) == 1, "an empty native sample must still produce a marked fallback")
+
+local registeredProvider, returnedReserves = nil, 0
+gameplay_traffic.registerSpecialVehicleProvider = function(provider) registeredProvider = provider end
+gameplay_traffic_trafficUtils = {createPoliceGroup = function() return {} end}
+overhaulMod.onTrafficSpecialVehiclesProviders()
+assert(registeredProvider.name == "rlsCarjackingPolice" and registeredProvider.getDesiredCount(100, {police = true}) == 0)
+assert(not registeredProvider.reserved, "must not add a standing reserve to normal traffic")
+assert(#registeredProvider.buildGroup(1) == 1, "must supply a marked fallback even for an empty sample")
+gameplay_traffic.returnReservedVehicle = function(ids)
+  assert(ids[1] == 20)
+  returnedReserves = returnedReserves + 1
+end
+overhaul_integration_services_police = nativePolice
+upvalue(overhaulMod.onUpdate, "refreshRlsModules")()
+processPendingReserve(0.25)
+assert(upvalue(requestReserve, "pendingPoliceReserve") == nil)
+assert(returnedReserves == 0, "an engaged reserve must stay claimed until pursuit completion")
+overhaulMod.onPursuitAction(99, "evade")
+assert(returnedReserves == 0, "another pursuit must not release this responder")
+overhaulMod.onPursuitAction(10, "evade")
+overhaulMod.onPursuitAction(10, "release")
+assert(returnedReserves == 1, "native completion must return the reserve exactly once")
+
+-- A native idle police object should be woken before creating a fallback.
+local poolWakes = 0
+local position = {distance = function() return 100 end}
+s.objects[10].getPosition = function() return position end
+s.objects[20].getPosition = function() return position end
+be.getObjectActive = function() return false end
+nativeTraffic[20].role = {name = "police", state = "none", flags = {}}
+nativePolice.getPoliceVehicles = function() return {[20] = nativeTraffic[20]} end
+core_vehicleActivePooling = {getPool = function(name)
+  assert(name == "autoTraffic")
+  return {setVeh = function(_, id, active)
+    assert(id == 20 and active == true)
+    poolWakes = poolWakes + 1
+    return true
+  end}
+end}
+local previousEnsureCount = reserveEnsured
+assert(requestReserve(10, 7))
+assert(poolWakes == 1 and reserveEnsured == previousEnsureCount,
+  "existing native pool police must get the first activation attempt")
+pendingReserve = upvalue(requestReserve, "pendingPoliceReserve")
+assert(pendingReserve.reserveId == 20 and not pendingReserve.isNative)
+processPendingReserve(1)
+assert(returnedReserves == 1, "an ordinary pool member must not be returned as a reserve")
+nativeTraffic[20].role = {name = "police", state = "chase", targetId = 99, targetPursuitMode = 3, flags = {busy = 1}}
+assert(requestReserve(10, 7))
+assert(poolWakes == 1 and reserveEnsured == previousEnsureCount + 1,
+  "a responder busy in another pursuit must not be woken or retargeted")
+
+-- On-foot pursuit handoff: RLS 2.8 leaves the pursuit on the abandoned car.
+-- The opt-out is enabled by default and must move the pursuit to the player.
+s = fixture(100)
+local handoffTraffic = {
+  [10] = {
+    role = {name = "suspect"},
+    pursuit = {mode = 2, score = 500, policeVisible = true, timers = {}},
+  },
+}
+handoffTraffic[10].setRole = function(self, name) self.role.name = name end
+local handoffCalls = {}
+local handoffResponders = {[20] = {role = {targetId = 10}}, [21] = {role = {targetId = 99}}}
+local handoffPolice = {
+  getPoliceVehicles = function() return handoffResponders end,
+  setPursuitMode = function(mode, id, ids)
+    table.insert(handoffCalls, {mode = mode, id = id, responders = ids})
+    if handoffTraffic[id] then handoffTraffic[id].pursuit.mode = mode end
+    for _, policeId in ipairs(ids or {}) do
+      handoffResponders[policeId].role.targetId = id
+    end
+  end,
+  arrestVehicle = function(id) handoffCalls.arrestId = id end,
+}
+overhaul_integration_services_police = handoffPolice
+gameplay_traffic = {
+  showMessages = false,
+  getTrafficData = function() return handoffTraffic end,
+  insertTraffic = function(id)
+    if handoffTraffic[id] then handoffTraffic[id].registered = true return end
+    if s.objects[id].jbeam == "unicycle" then return end -- real 0.40 isVehicle gate
+    handoffTraffic[id] = {role = {name = "standard"}, pursuit = {mode = 0}, queuedFuncs = {}}
+    handoffTraffic[id].setRole = function(self, name) self.role.name = name end
+  end,
+  removeTraffic = function(id) handoffTraffic[id] = nil end,
+}
+package.preload['gameplay/traffic/vehicle'] = function()
+  return function(options)
+    return {id = options.id, model = "unicycle", isPerson = true, isVehicle = false,
+      role = {name = "empty"}, pursuit = {mode = 0}, queuedFuncs = {},
+      postInit = function() end, setRole = function(self, name) self.role.name = name end}
+  end
+end
+s.objects[10] = {jbeam = "fullsize", isPlayerControlled = function() return false end}
+s.objects[11] = {jbeam = "unicycle", isPlayerControlled = function() return true end}
+s.objects[12] = {jbeam = "fullsize", isPlayerControlled = function() return true end}
+
+assert(s.mod.getConfig().restoreOnFootPursuitHandoff)
+s.player = 11
+s.mod.onVehicleSwitched(10, 11, 0)
+assert(handoffTraffic[11], "bailing out must insert the player walker into traffic")
+assert(handoffTraffic[11].role.name == "suspect" and handoffTraffic[11].pursuit.mode == 2,
+  "the pursuit must follow the player on foot")
+assert(handoffCalls[1].mode == 0 and handoffCalls[1].id == 10,
+  "the abandoned car must no longer be the pursuit target")
+assert(handoffTraffic[11].registered and handoffTraffic[11].isPerson and not handoffTraffic[11].isVehicle,
+  "native registration must retain the person's classification and update lifecycle")
+assert(handoffResponders[20].role.targetId == 11 and handoffResponders[21].role.targetId == 99,
+  "only the existing chasing officer must follow the walker")
+assert(not handoffTraffic[11].queuedFuncs.autoArrest,
+  "leaving the car on foot must not force an arrest")
+
+handoffCalls = {}
+handoffTraffic[12] = {role = {name = "standard"}, pursuit = {mode = 0}, queuedFuncs = {}}
+handoffTraffic[12].setRole = function(self, name) self.role.name = name end
+s.player = 12
+s.mod.onVehicleSwitched(11, 12, 0)
+assert(handoffTraffic[12].role.name == "suspect" and handoffTraffic[12].pursuit.mode == 2,
+  "entering another vehicle must take over the on-foot pursuit")
+assert(handoffCalls[1].mode == 0 and handoffCalls[1].id == 11)
+assert(not handoffTraffic[11], "retired player-only walker records must be removed natively")
+assert(handoffTraffic[12].queuedFuncs.autoArrest
+  and handoffTraffic[12].queuedFuncs.autoArrest.args[1] == 12,
+  "re-entering a vehicle while visible must keep the native forced-arrest handoff")
+
+s.mod.getConfig().restoreOnFootPursuitHandoff = false
+handoffTraffic[10].pursuit.mode = 2
+handoffCalls = {}
+s.mod.onVehicleSwitched(10, 11, 0)
+assert(#handoffCalls == 0, "disabling the option must keep RLS 2.8's car-bound pursuit")
+
+-- Bailing out before the asynchronous reserve is ready must carry its target
+-- onto the walker even if Abandon deletes the source car and inventory binding.
+s.mod.getConfig().restoreOnFootPursuitHandoff = true
+s.player = 10
+s.objects[10].getPosition = function() return position end
+handoffTraffic[10].pursuit.mode = 0
+core_vehicleActivePooling = nil
+handoffResponders[20].role.targetId = nil
+handoffResponders[21].role.targetId = 99
+handoffResponders[21].role.targetPursuitMode = 3
+handoffResponders[21].role.flags = {busy = 1}
+local pendingRequests = 0
+gameplay_traffic.ensureReservedVehicles = function() pendingRequests = pendingRequests + 1 return true end
+gameplay_traffic.useReservedVehicle = function() return {20} end
+local pendingRequest = upvalue(upvalue(s.mod.onUpdate,'processMaximumHeat'),'requestNativePoliceReserve')
+assert(pendingRequest(10,7) and pendingRequests == 1)
+s.player = 11
+s.mod.onVehicleSwitched(10,11,0)
+local transferredPending = upvalue(pendingRequest,'pendingPoliceReserve')
+assert(transferredPending.vehId == 11 and transferredPending.followPlayer)
+s.objects[10], handoffTraffic[10] = nil, nil
+s.mod.onVehicleDestroyed(10)
+handoffTraffic[20] = {state='active',role={name='police',state='none',flags={}}}
+s.objects[20] = {getActive=function() return true end}
+s.mod.onTrafficReservedVehiclesReady('rlsCarjackingPolice')
+upvalue(s.mod.onUpdate,'processPendingPoliceReserve')(1)
+assert(handoffTraffic[11].pursuit.mode == 3 and handoffResponders[20].role.targetId == 11)
+assert(not upvalue(pendingRequest,'pendingPoliceReserve'),
+  'deleting the stolen car must not strand the on-foot reserve request')
 
 print("PASS: strip confirmation/transactions, identity valuation/migration, parking, traffic")
